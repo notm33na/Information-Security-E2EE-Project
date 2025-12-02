@@ -24,3 +24,11 @@ Object.defineProperty(global, 'crypto', {
   enumerable: true
 });
 
+// Use a reduced PBKDF2 iteration count in tests to keep the E2E crypto
+// suite performant, while production defaults remain strong (100k).
+if (typeof process !== 'undefined' && process.env) {
+  if (!process.env.CRYPTO_PBKDF2_ITERATIONS) {
+    process.env.CRYPTO_PBKDF2_ITERATIONS = '5000';
+  }
+}
+

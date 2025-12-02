@@ -5,13 +5,14 @@
  * from Phase 3. Includes replay protection and integrity checking.
  */
 
-import { getSendKey, getRecvKey, updateSessionSeq, loadSession, triggerReplayDetection, triggerInvalidSignature } from './sessionManager.js';
+import { getSendKey, getRecvKey, updateSessionSeq, loadSession, triggerReplayDetection, triggerInvalidSignature, isNonceUsed, storeUsedNonce } from './sessionManager.js';
 import { encryptAESGCM, decryptAESGCM, decryptAESGCMToString } from './aesGcm.js';
 import { buildTextMessageEnvelope } from './messageEnvelope.js';
 import { validateEnvelopeStructure } from './messageEnvelope.js';
 import { base64ToArrayBuffer } from './signatures.js';
 import { sequenceManager, generateTimestamp } from './messages.js';
-import { clearPlaintextAfterEncryption, clearPlaintextAfterDecryption } from '../utils/memorySecurity.js';
+import { clearPlaintextAfterEncryption, clearPlaintextAfterDecryption } from './memorySecurity.js';
+import { logReplayAttempt, logTimestampFailure, logSeqMismatch, logDecryptionError, logMessageDropped } from '../utils/clientLogger.js';
 
 /**
  * Validates timestamp freshness
@@ -23,6 +24,22 @@ function validateTimestamp(messageTimestamp, maxAge = 120000) {
   const now = Date.now();
   const age = now - messageTimestamp;
   return age <= maxAge && age >= -maxAge;
+}
+
+/**
+ * Computes SHA-256 hash of a nonce (ArrayBuffer) and returns hex string.
+ * @param {ArrayBuffer} nonceBuffer - Raw nonce bytes
+ * @returns {Promise<string>} Hex-encoded SHA-256 hash
+ */
+async function hashNonce(nonceBuffer) {
+  const nonceBytes = new Uint8Array(nonceBuffer);
+  const digest = await crypto.subtle.digest('SHA-256', nonceBytes);
+  const hashBytes = new Uint8Array(digest);
+  let hex = '';
+  for (const b of hashBytes) {
+    hex += b.toString(16).padStart(2, '0');
+  }
+  return hex;
 }
 
 /**
@@ -77,7 +94,12 @@ export async function sendEncryptedMessage(sessionId, plaintext, socketEmit, use
 
     return envelope;
   } catch (error) {
-    throw new Error(`Failed to send encrypted message: ${error.message}`);
+    // If error already has userMessage, preserve it; otherwise create friendly error
+    if (error.userMessage) {
+      throw error;
+    }
+    const { createUserFriendlyError } = await import('../utils/cryptoErrors.js');
+    throw createUserFriendlyError(error, 'message sending');
   }
 }
 
@@ -101,25 +123,18 @@ export async function handleIncomingMessage(envelope, userId = null) {
     if (!validateTimestamp(envelope.timestamp, maxAge)) {
       const error = 'Timestamp out of validity window';
       console.warn(`⚠️  Replay attempt: ${error}`);
-      logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error);
+      await logTimestampFailure(envelope.sessionId, envelope.seq, envelope.timestamp, error, userId);
+      await logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error, userId);
       triggerReplayDetection(envelope.sessionId, { ...envelope, reason: error });
       return { valid: false, error };
     }
 
-    // 3. Validate sequence number (strictly increasing)
-    const isValidSeq = sequenceManager.validateSequence(envelope.sessionId, envelope.seq);
-    if (!isValidSeq) {
-      const error = 'Sequence number must be strictly increasing';
-      console.warn(`⚠️  Replay attempt: ${error}`);
-      logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error);
-      triggerReplayDetection(envelope.sessionId, { ...envelope, reason: error });
-      return { valid: false, error };
-    }
-
-    // 4. Load session and receive key (with userId for encrypted key access)
+    // 3. Load session early to get lastSeq for validation
     const session = await loadSession(envelope.sessionId, userId);
     if (!session) {
-      return { valid: false, error: 'Session not found' };
+      const error = 'Session not found';
+      await logMessageDropped(envelope.sessionId, envelope.seq, error, userId);
+      return { valid: false, error };
     }
 
     // Use userId from session if not provided
@@ -127,14 +142,58 @@ export async function handleIncomingMessage(envelope, userId = null) {
       userId = session.userId;
     }
 
+    // 3.5. Validate sequence number (strictly increasing)
+    const lastSeq = session.lastSeq || 0;
+    const isValidSeq = sequenceManager.validateSequence(envelope.sessionId, envelope.seq);
+    if (!isValidSeq) {
+      const error = 'Sequence number must be strictly increasing';
+      console.warn(`⚠️  Replay attempt: ${error}`);
+      await logSeqMismatch(envelope.sessionId, envelope.seq, lastSeq, userId);
+      await logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error, userId);
+      triggerReplayDetection(envelope.sessionId, { ...envelope, reason: error });
+      return { valid: false, error };
+    }
+
+    // 4. Validate nonce presence, size, and uniqueness (client-side)
+    if (!envelope.nonce) {
+      const error = 'Missing nonce';
+      console.warn(`⚠️  Replay attempt: ${error}`);
+      await logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error, userId);
+      triggerReplayDetection(envelope.sessionId, { ...envelope, reason: error });
+      return { valid: false, error };
+    }
+
+    // Decode nonce and enforce size constraints (12–32 bytes)
+    const nonceBuffer = base64ToArrayBuffer(envelope.nonce);
+    const nonceLength = new Uint8Array(nonceBuffer).byteLength;
+    if (nonceLength < 12 || nonceLength > 32) {
+      const error = `Invalid nonce length: ${nonceLength} (expected 12–32 bytes)`;
+      console.warn(`⚠️  Replay attempt: ${error}`);
+      await logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error, userId);
+      triggerReplayDetection(envelope.sessionId, { ...envelope, reason: error });
+      return { valid: false, error };
+    }
+
+    const nonceHash = await hashNonce(nonceBuffer);
+    const nonceAlreadyUsed = await isNonceUsed(envelope.sessionId, nonceHash);
+    if (nonceAlreadyUsed) {
+      const error = 'Duplicate nonce for this session';
+      console.warn(`⚠️  Replay attempt: ${error}`);
+      await logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, error, userId);
+      triggerReplayDetection(envelope.sessionId, { ...envelope, reason: error });
+      return { valid: false, error };
+    }
+
+    // 5. Get receive key (session already loaded and validated)
+
     const recvKey = await getRecvKey(envelope.sessionId, userId);
 
-    // 5. Convert base64 fields to ArrayBuffer
+    // 6. Convert base64 fields to ArrayBuffer
     const ciphertext = base64ToArrayBuffer(envelope.ciphertext);
     const iv = base64ToArrayBuffer(envelope.iv);
     const authTag = base64ToArrayBuffer(envelope.authTag);
 
-    // 6. Decrypt using recvKey
+    // 7. Decrypt using recvKey
     let plaintext;
     try {
       if (envelope.type === 'MSG') {
@@ -144,8 +203,11 @@ export async function handleIncomingMessage(envelope, userId = null) {
         plaintext = await decryptAESGCM(recvKey, iv, ciphertext, authTag);
       }
 
-      // 7. Update session sequence (with userId for encrypted storage)
+      // 8. Update session sequence (with userId for encrypted storage)
       await updateSessionSeq(envelope.sessionId, envelope.seq, userId);
+
+      // 9. Store nonce hash in session metadata (track last 200 nonces)
+      await storeUsedNonce(envelope.sessionId, nonceHash);
 
       console.log(`✓ Message decrypted successfully (seq: ${envelope.seq})`);
 
@@ -165,54 +227,27 @@ export async function handleIncomingMessage(envelope, userId = null) {
         envelope
       };
     } catch (error) {
-    console.error('Failed to handle incoming message:', error);
-    logInvalidEnvelope(envelope.sessionId, envelope.seq, error.message);
-    
-    // Trigger invalid signature detection if decryption fails (could be tampered)
-    if (error.message.includes('decrypt') || error.message.includes('auth tag')) {
-      triggerInvalidSignature(envelope.sessionId, { ...envelope, reason: error.message });
+      // Log technical error for debugging
+      const technicalMessage = error.technicalMessage || error.message;
+      console.error('Failed to handle incoming message:', technicalMessage);
+      await logDecryptionError(envelope.sessionId, envelope.seq, technicalMessage, userId);
+      
+      // Trigger invalid signature detection if decryption fails (could be tampered)
+      if (technicalMessage.includes('decrypt') || technicalMessage.includes('auth tag') || technicalMessage.includes('Authentication tag')) {
+        triggerInvalidSignature(envelope.sessionId, { ...envelope, reason: technicalMessage });
+      }
+      
+      // Return user-friendly error message
+      const userMessage = error.userMessage || error.message || 'Failed to process message';
+      return { valid: false, error: userMessage, technicalError: technicalMessage };
     }
-    
-    return { valid: false, error: error.message };
+  } catch (error) {
+    // Outer catch for any unexpected errors
+    const technicalMessage = error.technicalMessage || error.message;
+    console.error('Unexpected error in handleIncomingMessage:', technicalMessage);
+    const userMessage = error.userMessage || error.message || 'An unexpected error occurred';
+    return { valid: false, error: userMessage, technicalError: technicalMessage };
   }
 }
 
-/**
- * Logs replay attempt (client-side)
- * @param {string} sessionId - Session identifier
- * @param {number} seq - Sequence number
- * @param {number} timestamp - Message timestamp
- * @param {string} reason - Reason for rejection
- */
-function logReplayAttempt(sessionId, seq, timestamp, reason) {
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    sessionId,
-    seq,
-    messageTimestamp: timestamp,
-    reason,
-    type: 'replay_attempt',
-    source: 'client'
-  };
-  console.warn('Replay attempt detected:', logEntry);
-  // In production, could send to server for centralized logging
-}
-
-/**
- * Logs invalid envelope (client-side)
- * @param {string} sessionId - Session identifier
- * @param {number} seq - Sequence number
- * @param {string} reason - Reason for rejection
- */
-function logInvalidEnvelope(sessionId, seq, reason) {
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    sessionId,
-    seq,
-    reason,
-    type: 'invalid_envelope',
-    source: 'client'
-  };
-  console.error('Invalid envelope:', logEntry);
-}
 

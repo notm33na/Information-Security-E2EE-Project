@@ -15,6 +15,7 @@ describe('Automated MITM Attack Simulation (KEP and Session Establishment)', () 
   const sessionId = 'mitm-session-1';
   const aliceId = 'alice';
   const bobId = 'bob';
+  const alicePassword = 'TestPassword123!alice';
 
   beforeEach(async () => {
     await new Promise((resolve, reject) => {
@@ -139,8 +140,16 @@ describe('Automated MITM Attack Simulation (KEP and Session Establishment)', () 
     // Normal shared secret & session creation for comparison
     const shared = await computeSharedSecret(aliceEph.privateKey, bobEph.publicKey);
     const keys = await deriveSessionKeys(shared, sessionId, aliceId, bobId);
-    await createSession(sessionId, aliceId, bobId, keys.rootKey, keys.sendKey, keys.recvKey);
-    const baseSession = await loadSession(sessionId);
+    await createSession(
+      sessionId,
+      aliceId,
+      bobId,
+      keys.rootKey,
+      keys.sendKey,
+      keys.recvKey,
+      alicePassword,
+    );
+    const baseSession = await loadSession(sessionId, aliceId);
     expect(baseSession).not.toBeNull();
 
     // Build a legitimate KEP_RESPONSE from Bob

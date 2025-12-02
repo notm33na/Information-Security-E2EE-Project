@@ -140,6 +140,17 @@ recvKey = HKDF(rootKey, salt="RECV", info=aliceId, length=256)
 - **Sequence Numbers**: Strictly increasing per session
 - **Nonces**: Additional randomness for uniqueness
 
+### Nonce Validation (Newly Implemented)
+
+- **Per-Message Nonce**: KEP_INIT and KEP_RESPONSE messages include a base64-encoded nonce generated from 16 random bytes.
+- **Client-Side Validation**:
+  - Nonce must be present and decode to a 12–32 byte value.
+  - Clients compute `SHA-256(nonce)` and record the last 200 nonce hashes per session in IndexedDB.
+  - Reuse of a nonce hash within a session results in the KEP message being rejected as a replay attempt, and replay detection callbacks are triggered.
+- **Server-Side Validation**:
+  - For KEP messages stored in metadata (where applicable), the same nonce hashing is applied and stored as `nonceHash` with uniqueness enforced per session.
+  - Duplicate nonce hashes for a given `sessionId` are treated as replay attempts, rejected, and logged with a `REPLAY_REJECT: Duplicate nonce detected` reason.
+
 ## Message Format
 
 ### KEP_INIT

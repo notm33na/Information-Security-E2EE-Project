@@ -43,8 +43,8 @@ const metadataAuditSchema = new mongoose.Schema({
   },
   timestamp: {
     type: Date,
-    default: Date.now,
-    index: true
+    default: Date.now
+    // Index is created via TTL index below
   }
 }, {
   timestamps: true

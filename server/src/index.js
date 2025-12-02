@@ -29,6 +29,9 @@ const app = express();
 const PORT_HTTP = parseInt(process.env.PORT_HTTP || '8080', 10);
 const PORT_HTTPS = parseInt(process.env.PORT_HTTPS || '8443', 10);
 
+// Trust proxy for proper HTTPS detection behind reverse proxies (nginx, etc.)
+app.set('trust proxy', true);
+
 // Middleware
 app.use(express.json({ limit: '10mb' })); // Limit request body size
 app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Limit URL-encoded body size
@@ -53,10 +56,34 @@ app.use(authErrorHandler);
 // Global error handler
 app.use((error, req, res, next) => {
   console.error('Error:', error);
-  res.status(error.status || 500).json({
+  
+  // Determine user-friendly error message
+  let userMessage = 'An unexpected error occurred. Please try again.';
+  let statusCode = error.status || 500;
+  
+  // Handle specific error types with user-friendly messages
+  if (error.name === 'PasswordValidationError') {
+    userMessage = error.errors?.join(', ') || 'Password does not meet requirements';
+    statusCode = 400;
+  } else if (error.name === 'DuplicateUserError') {
+    userMessage = 'An account with this email already exists. Please use a different email or try logging in.';
+    statusCode = 409;
+  } else if (error.name === 'ValidationError') {
+    userMessage = error.message || 'Invalid input data';
+    statusCode = 400;
+  } else if (error.message) {
+    // Use error message if it's already user-friendly
+    userMessage = error.message;
+  }
+  
+  res.status(statusCode).json({
     success: false,
-    error: error.message || 'Internal server error',
-    ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
+    error: userMessage,
+    message: userMessage, // Also include in message field for consistency
+    ...(process.env.NODE_ENV === 'development' && { 
+      stack: error.stack,
+      technicalError: error.message 
+    })
   });
 });
 

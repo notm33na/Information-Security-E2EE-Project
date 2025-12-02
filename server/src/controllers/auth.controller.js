@@ -2,6 +2,8 @@ import { validationResult } from 'express-validator';
 import { userService } from '../services/user.service.js';
 import { generateAccessToken, generateRefreshToken, verifyToken } from '../utils/jwt.js';
 import { logAuthenticationAttempt } from '../utils/attackLogging.js';
+import { recordAuthFailure } from '../utils/alerting.js';
+import { authLogger } from '../utils/logger.js';
 
 /**
  * Register a new user
@@ -32,7 +34,28 @@ export async function register(req, res, next) {
     }
 
     // Create user
-    const user = await userService.createUser(email, password);
+    let user;
+    try {
+      user = await userService.createUser(email, password);
+    } catch (userError) {
+      // Handle specific user creation errors with user-friendly messages
+      if (userError.name === 'PasswordValidationError') {
+        return res.status(400).json({
+          success: false,
+          error: 'Password validation failed',
+          message: userError.errors?.join(', ') || 'Password does not meet security requirements'
+        });
+      }
+      if (userError.name === 'DuplicateUserError') {
+        return res.status(409).json({
+          success: false,
+          error: 'User already exists',
+          message: 'An account with this email already exists. Please use a different email or try logging in.'
+        });
+      }
+      // Re-throw to be handled by global error handler
+      throw userError;
+    }
 
     // Generate tokens
     // Get client IP and user-agent for token binding
@@ -43,7 +66,6 @@ export async function register(req, res, next) {
     const refreshToken = generateRefreshToken(user.id, user.email);
 
     // Store refresh token in database
-    const userAgent = req.headers['user-agent'] || '';
     const ip = req.ip || req.connection.remoteAddress || '';
     await userService.addRefreshToken(user.id, refreshToken, userAgent, ip);
 
@@ -86,10 +108,14 @@ export async function login(req, res, next) {
 
     const { email, password } = req.body;
 
+    // Get client IP for alerting
+    const clientIP = req.ip || req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+
     // Get user with password hash
     const user = await userService.getUserByEmail(email, true);
     if (!user) {
       logAuthenticationAttempt(null, false, 'User not found');
+      recordAuthFailure(null, clientIP, 'User not found');
       return res.status(401).json({
         success: false,
         error: 'Invalid credentials',
@@ -100,6 +126,7 @@ export async function login(req, res, next) {
     // Check if account is active
     if (!user.isActive) {
       logAuthenticationAttempt(user._id.toString(), false, 'Account deactivated');
+      recordAuthFailure(user._id.toString(), clientIP, 'Account deactivated');
       return res.status(403).json({
         success: false,
         error: 'Account deactivated',
@@ -113,6 +140,7 @@ export async function login(req, res, next) {
     
     if (lockoutStatus.locked) {
       logAuthenticationAttempt(user._id.toString(), false, 'Account locked due to too many failed attempts');
+      recordAuthFailure(user._id.toString(), clientIP, 'Account locked');
       return res.status(423).json({
         success: false,
         error: 'Account locked',
@@ -127,6 +155,7 @@ export async function login(req, res, next) {
       // Record failed attempt
       const attemptStatus = recordFailedAttempt(user._id.toString());
       logAuthenticationAttempt(user._id.toString(), false, 'Invalid password');
+      recordAuthFailure(user._id.toString(), clientIP, 'Invalid password');
       
       if (attemptStatus.locked) {
         const LOCKOUT_DURATION_MINUTES = 15; // 15 minutes
@@ -149,12 +178,18 @@ export async function login(req, res, next) {
 
     // Log successful authentication
     logAuthenticationAttempt(user._id.toString(), true, 'Login successful');
+    authLogger.info({
+      event: 'login_success',
+      userId: user._id.toString(),
+      email: user.email,
+      ip: clientIP,
+      timestamp: new Date().toISOString()
+    });
 
     // Update last login
     await userService.updateLastLogin(user._id.toString());
 
-    // Get client IP and user-agent for token binding
-    const clientIP = req.ip || req.socket.remoteAddress || req.headers['x-forwarded-for'] || '';
+    // Get user-agent for token binding (clientIP already declared above)
     const userAgent = req.headers['user-agent'] || '';
 
     // Generate tokens with binding
@@ -163,7 +198,6 @@ export async function login(req, res, next) {
     const refreshToken = generateRefreshToken(userId, user.email);
 
     // Store refresh token in database
-    const userAgent = req.headers['user-agent'] || '';
     const ip = req.ip || req.connection.remoteAddress || '';
     await userService.addRefreshToken(userId, refreshToken, userAgent, ip);
 
@@ -301,7 +335,6 @@ export async function refresh(req, res, next) {
     const newRefreshToken = generateRefreshToken(userId, user.email);
 
     // Store new refresh token
-    const userAgent = req.headers['user-agent'] || '';
     const ip = req.ip || req.connection.remoteAddress || '';
     await userService.addRefreshToken(userId, newRefreshToken, userAgent, ip);
 

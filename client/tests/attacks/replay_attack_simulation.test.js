@@ -15,6 +15,7 @@ describe('Automated Replay Attack Simulation (Message Metadata)', () => {
   const sessionId = 'replay-session-1';
   const userId = 'alice';
   const peerId = 'bob';
+  const password = 'TestPassword123!alice';
 
   const keyBytes = new Uint8Array(32);
 
@@ -31,6 +32,7 @@ describe('Automated Replay Attack Simulation (Message Metadata)', () => {
       keyBytes.buffer,
       keyBytes.buffer,
       keyBytes.buffer,
+      password,
     );
   });
 

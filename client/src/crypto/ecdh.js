@@ -98,7 +98,11 @@ export async function hkdf(inputKeyMaterial, salt, info, length) {
  * Key derivation chain:
  * 1. rootKey = HKDF(sharedSecret, salt="ROOT", info=sessionId, 256 bits)
  * 2. sendKey = HKDF(rootKey, salt="SEND", info=userId, 256 bits)
- * 3. recvKey = HKDF(rootKey, salt="RECV", info=peerId, 256 bits)
+ * 3. recvKey = HKDF(rootKey, salt="SEND", info=peerId, 256 bits)
+ * 
+ * Note: Both sendKey and recvKey use "SEND" salt to ensure symmetry:
+ * - Alice's sendKey = HKDF(rootKey, "SEND", aliceId) = Bob's recvKey = HKDF(rootKey, "SEND", aliceId)
+ * - Bob's sendKey = HKDF(rootKey, "SEND", bobId) = Alice's recvKey = HKDF(rootKey, "SEND", bobId)
  * 
  * @param {ArrayBuffer} sharedSecret - ECDH shared secret
  * @param {string} sessionId - Unique session identifier
@@ -116,12 +120,15 @@ export async function deriveSessionKeys(sharedSecret, sessionId, userId, peerId)
     const rootKey = await hkdf(sharedSecret, rootKeySalt, rootKeyInfo, 256);
 
     // Derive send key (for messages we send)
+    // This will match the peer's recvKey when they derive with same salt and our userId as info
     const sendKeySalt = encoder.encode('SEND');
     const sendKeyInfo = encoder.encode(userId);
     const sendKey = await hkdf(rootKey, sendKeySalt, sendKeyInfo, 256);
 
     // Derive receive key (for messages we receive)
-    const recvKeySalt = encoder.encode('RECV');
+    // This matches the peer's sendKey (they derive with same salt and their userId, which is our peerId)
+    // Use "SEND" salt to ensure symmetry: peer's sendKey = HKDF(rootKey, "SEND", peerId) = our recvKey
+    const recvKeySalt = encoder.encode('SEND');
     const recvKeyInfo = encoder.encode(peerId);
     const recvKey = await hkdf(rootKey, recvKeySalt, recvKeyInfo, 256);
 

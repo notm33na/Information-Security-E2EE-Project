@@ -10,14 +10,11 @@ export function ProtectedRoute({ children }) {
 
   if (loading) {
     return (
-      <div style={{ 
-        display: 'flex', 
-        justifyContent: 'center', 
-        alignItems: 'center', 
-        height: '100vh' 
-      }}>
-        <div className="spinner"></div>
-        <p>Loading...</p>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-8 h-8 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+          <p className="text-muted-foreground">Loading...</p>
+        </div>
       </div>
     );
   }

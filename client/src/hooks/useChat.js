@@ -99,10 +99,26 @@ export function useChat(sessionId, socket) {
             }
           }
         } else {
-          console.error('Invalid message:', result.error);
+          // Log technical error but show user-friendly message
+          const technicalError = result.technicalError || result.error;
+          const userError = result.error || 'Failed to process message';
+          console.error('Invalid message:', technicalError);
+          
+          // Optionally show user-friendly error notification
+          // (This could be integrated with a toast/notification system)
+          if (result.error && !result.error.includes('replay') && !result.error.includes('duplicate')) {
+            // Only show non-replay errors to user (replay errors are handled silently)
+            console.warn('Message processing error:', userError);
+          }
         }
       } catch (error) {
-        console.error('Error handling message:', error);
+        // Log technical error for debugging
+        const technicalMessage = error.technicalMessage || error.message;
+        console.error('Error handling message:', technicalMessage);
+        
+        // Show user-friendly error if available
+        const userMessage = error.userMessage || 'Failed to process message';
+        console.warn('User-facing error:', userMessage);
       } finally {
         setIsDecrypting(false);
       }
@@ -176,7 +192,17 @@ export function useChat(sessionId, socket) {
         sent: true
       }]);
     } catch (error) {
-      console.error('Failed to send message:', error);
+      // Log technical error for debugging
+      const technicalMessage = error.technicalMessage || error.message;
+      console.error('Failed to send message:', technicalMessage);
+      
+      // Re-throw with user-friendly message if available
+      if (error.userMessage) {
+        const userError = new Error(error.userMessage);
+        userError.technicalMessage = technicalMessage;
+        userError.originalError = error;
+        throw userError;
+      }
       throw error;
     }
   }, [socket, sessionId, user]);
@@ -213,7 +239,17 @@ export function useChat(sessionId, socket) {
 
       console.log(`✓ File sent: ${file.name}`);
     } catch (error) {
-      console.error('Failed to send file:', error);
+      // Log technical error for debugging
+      const technicalMessage = error.technicalMessage || error.message;
+      console.error('Failed to send file:', technicalMessage);
+      
+      // Re-throw with user-friendly message if available
+      if (error.userMessage) {
+        const userError = new Error(error.userMessage);
+        userError.technicalMessage = technicalMessage;
+        userError.originalError = error;
+        throw userError;
+      }
       throw error;
     }
   }, [socket, sessionId]);

@@ -122,24 +122,41 @@ export async function buildKEPInit(fromUserId, toUserId, ephPublicKey, identityP
  * @param {Object} message - KEP_INIT message
  * @param {CryptoKey} identityPublicKey - Sender's identity public key
  * @param {number} maxAge - Maximum age in milliseconds (default: 2 minutes)
+ * @param {string} [userId] - User ID for logging
  * @returns {Promise<{valid: boolean, error?: string}>}
  */
-export async function validateKEPInit(message, identityPublicKey, maxAge = 120000) {
+export async function validateKEPInit(message, identityPublicKey, maxAge = 120000, userId = null) {
   try {
     // Check message structure
     if (!message.type || message.type !== 'KEP_INIT') {
-      return { valid: false, error: 'Invalid message type' };
+      const error = 'Invalid message type';
+      if (userId && message.sessionId) {
+        const { logKEPError } = await import('../utils/clientLogger.js');
+        await logKEPError(message.sessionId, error, userId, 'KEP_INIT');
+      }
+      return { valid: false, error };
     }
 
     if (!message.from || !message.to || !message.ephPub || !message.signature) {
-      return { valid: false, error: 'Missing required fields' };
+      const error = 'Missing required fields';
+      if (userId && message.sessionId) {
+        const { logKEPError } = await import('../utils/clientLogger.js');
+        await logKEPError(message.sessionId, error, userId, 'KEP_INIT');
+      }
+      return { valid: false, error };
     }
 
     // Verify timestamp freshness
     const now = Date.now();
     const age = now - message.timestamp;
     if (age > maxAge || age < -maxAge) {
-      return { valid: false, error: 'Timestamp out of validity window' };
+      const error = 'Timestamp out of validity window';
+      if (userId && message.sessionId) {
+        const { logKEPError, logTimestampFailure } = await import('../utils/clientLogger.js');
+        await logTimestampFailure(message.sessionId, message.seq || 0, message.timestamp, error, userId);
+        await logKEPError(message.sessionId, error, userId, 'KEP_INIT');
+      }
+      return { valid: false, error };
     }
 
     // Verify signature
@@ -148,12 +165,23 @@ export async function validateKEPInit(message, identityPublicKey, maxAge = 12000
     const isValid = await verifyEphemeralKeySignature(identityPublicKey, signature, message.ephPub);
 
     if (!isValid) {
-      return { valid: false, error: 'Invalid signature' };
+      const error = 'Invalid signature';
+      if (userId && message.sessionId) {
+        const { logInvalidSignature, logKEPError } = await import('../utils/clientLogger.js');
+        await logInvalidSignature(message.sessionId, error, userId, 'KEP_INIT');
+        await logKEPError(message.sessionId, error, userId, 'KEP_INIT');
+      }
+      return { valid: false, error };
     }
 
     return { valid: true };
   } catch (error) {
-    return { valid: false, error: error.message };
+    const errorMsg = error.message;
+    if (userId && message?.sessionId) {
+      const { logKEPError } = await import('../utils/clientLogger.js');
+      await logKEPError(message.sessionId, errorMsg, userId, 'KEP_INIT');
+    }
+    return { valid: false, error: errorMsg };
   }
 }
 
@@ -223,18 +251,34 @@ export async function validateKEPResponse(message, identityPublicKey, rootKey, u
   try {
     // Check message structure
     if (!message.type || message.type !== 'KEP_RESPONSE') {
-      return { valid: false, error: 'Invalid message type' };
+      const error = 'Invalid message type';
+      if (userId && message.sessionId) {
+        const { logKEPError } = await import('../utils/clientLogger.js');
+        await logKEPError(message.sessionId, error, userId, 'KEP_RESPONSE');
+      }
+      return { valid: false, error };
     }
 
     if (!message.from || !message.ephPub || !message.signature || !message.keyConfirmation) {
-      return { valid: false, error: 'Missing required fields' };
+      const error = 'Missing required fields';
+      if (userId && message.sessionId) {
+        const { logKEPError } = await import('../utils/clientLogger.js');
+        await logKEPError(message.sessionId, error, userId, 'KEP_RESPONSE');
+      }
+      return { valid: false, error };
     }
 
     // Verify timestamp freshness
     const now = Date.now();
     const age = now - message.timestamp;
     if (age > maxAge || age < -maxAge) {
-      return { valid: false, error: 'Timestamp out of validity window' };
+      const error = 'Timestamp out of validity window';
+      if (userId && message.sessionId) {
+        const { logKEPError, logTimestampFailure } = await import('../utils/clientLogger.js');
+        await logTimestampFailure(message.sessionId, message.seq || 0, message.timestamp, error, userId);
+        await logKEPError(message.sessionId, error, userId, 'KEP_RESPONSE');
+      }
+      return { valid: false, error };
     }
 
     // Verify signature
@@ -243,7 +287,13 @@ export async function validateKEPResponse(message, identityPublicKey, rootKey, u
     const isValid = await verifyEphemeralKeySignature(identityPublicKey, signature, message.ephPub);
 
     if (!isValid) {
-      return { valid: false, error: 'Invalid signature' };
+      const error = 'Invalid signature';
+      if (userId && message.sessionId) {
+        const { logInvalidSignature, logKEPError } = await import('../utils/clientLogger.js');
+        await logInvalidSignature(message.sessionId, error, userId, 'KEP_RESPONSE');
+        await logKEPError(message.sessionId, error, userId, 'KEP_RESPONSE');
+      }
+      return { valid: false, error };
     }
 
     // Verify key confirmation
@@ -260,12 +310,22 @@ export async function validateKEPResponse(message, identityPublicKey, rootKey, u
     const confirmValid = await crypto.subtle.verify('HMAC', hmacKey, keyConfirmation, confirmData);
 
     if (!confirmValid) {
-      return { valid: false, error: 'Key confirmation failed' };
+      const error = 'Key confirmation failed';
+      if (userId && message.sessionId) {
+        const { logKEPError } = await import('../utils/clientLogger.js');
+        await logKEPError(message.sessionId, error, userId, 'KEP_RESPONSE');
+      }
+      return { valid: false, error };
     }
 
     return { valid: true };
   } catch (error) {
-    return { valid: false, error: error.message };
+    const errorMsg = error.message;
+    if (userId && message?.sessionId) {
+      const { logKEPError } = await import('../utils/clientLogger.js');
+      await logKEPError(message.sessionId, errorMsg, userId, 'KEP_RESPONSE');
+    }
+    return { valid: false, error: errorMsg };
   }
 }
 

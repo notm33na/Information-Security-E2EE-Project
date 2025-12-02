@@ -6,7 +6,8 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { validateTimestamp, generateMessageId } from '../src/utils/replayProtection.js';
+import crypto from 'crypto';
+import { validateTimestamp, generateMessageId, hashNonceBase64 } from '../src/utils/replayProtection.js';
 import { logReplayAttempt } from '../src/utils/attackLogging.js';
 import { MessageMeta } from '../src/models/MessageMeta.js';
 import { KEPMessage } from '../src/models/KEPMessage.js';
@@ -33,6 +34,13 @@ function readLogFile(filename) {
     return fs.readFileSync(logPath, 'utf8');
   }
   return '';
+}
+
+// Helper to generate a unique nonce hash for tests
+function generateTestNonceHash() {
+  const nonceBytes = crypto.randomBytes(16);
+  const nonceBase64 = nonceBytes.toString('base64');
+  return hashNonceBase64(nonceBase64);
 }
 
 describe('Replay Protection Tests', () => {
@@ -117,7 +125,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp,
-        seq: 1
+        seq: 1,
+        nonceHash: generateTestNonceHash()
       });
       await message1.save();
 
@@ -129,7 +138,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp,
-        seq: 1
+        seq: 1,
+        nonceHash: generateTestNonceHash() // Different nonce, but same messageId should still be rejected
       });
 
       await expect(message2.save()).rejects.toThrow();
@@ -155,6 +165,7 @@ describe('Replay Protection Tests', () => {
       const timestamp = Date.now();
       const seq = 1;
 
+      const nonceHash1 = generateTestNonceHash();
       const message1 = new MessageMeta({
         messageId: generateMessageId(sessionId, seq, timestamp),
         sessionId,
@@ -162,7 +173,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp,
-        seq
+        seq,
+        nonceHash: nonceHash1
       });
       await message1.save();
 
@@ -174,7 +186,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp, // Same timestamp
-        seq // Same seq
+        seq, // Same seq
+        nonceHash: generateTestNonceHash() // Different nonce, but same messageId should still be rejected
       });
 
       await expect(message2.save()).rejects.toThrow();
@@ -195,7 +208,8 @@ describe('Replay Protection Tests', () => {
           receiver: testUser2.id,
           type: 'MSG',
           timestamp: baseTimestamp + seq * 1000, // Ensure unique timestamps
-          seq
+          seq,
+          nonceHash: generateTestNonceHash()
         });
         await message.save();
       }
@@ -218,7 +232,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp: timestamp + 5,
-        seq: 5
+        seq: 5,
+        nonceHash: generateTestNonceHash()
       });
       await message1.save();
 
@@ -230,7 +245,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp: timestamp + 3,
-        seq: 3
+        seq: 3,
+        nonceHash: generateTestNonceHash()
       });
 
       // This should be allowed (sequence can be out of order if timestamp is valid)
@@ -245,7 +261,8 @@ describe('Replay Protection Tests', () => {
         receiver: testUser2.id,
         type: 'MSG',
         timestamp: timestamp + 3,
-        seq: 3
+        seq: 3,
+        nonceHash: generateTestNonceHash() // Different nonce, but same messageId should still be rejected
       });
 
       await expect(message3.save()).rejects.toThrow(); // Duplicate messageId

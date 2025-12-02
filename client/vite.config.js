@@ -13,6 +13,13 @@ export default defineConfig({
         changeOrigin: true,
         secure: false, // Allow self-signed certificates
         rewrite: (path) => path
+      },
+      '/socket.io': {
+        target: 'https://localhost:8443',
+        changeOrigin: true,
+        secure: false, // Allow self-signed certificates
+        ws: true, // Enable WebSocket proxying
+        rewrite: (path) => path
       }
     }
   }

@@ -3148,6 +3148,16 @@ _Note: Performance may vary based on hardware and network conditions._
 - [Cryptographic Design](./docs/cryptography/CRYPTOGRAPHIC_DESIGN.md)
 - [Phase 3 Crypto Design](./docs/cryptography/PHASE3_CRYPTO_DESIGN.md)
 - [Phase 4 Messaging Design](./docs/PHASE4_MESSAGING_DESIGN.md)
+- [Attack Demonstrations](./docs/security/ATTACK_DEMONSTRATIONS.md)
+- [Logging System Documentation](./docs/logging/LOGGING_SYSTEM_DOCUMENTATION.md)
+- [Logging Guide](./docs/LOGGING.md)
+
+### Nonce Validation (Newly Implemented)
+
+- **Per-Message Nonces**: Every KEP message and encrypted envelope carries a per-message nonce (16 random bytes, base64-encoded).
+- **Client-Side Tracking**: The frontend validates nonce presence and size (12–32 bytes), hashes the nonce with SHA-256, and stores the last 200 nonce hashes per session in IndexedDB. Any reuse of a nonce hash for the same session causes the message to be rejected before decryption and triggers replay detection callbacks.
+- **Server-Side Enforcement**: The backend validates nonce format, computes `nonceHash = SHA-256(nonce)`, and stores it in `MessageMeta` with a compound unique index `{ sessionId: 1, nonceHash: 1 }`. Duplicate nonces within a session are rejected as replay attempts and logged (e.g., `REPLAY_REJECT: Duplicate nonce detected` in `replay_attempts.log`).
+- **Defense-in-Depth**: Nonce validation complements existing timestamp, sequence-number, and messageId uniqueness checks, ensuring that replayed ciphertext is rejected even if timestamps and sequence numbers are manipulated.
 
 ### Demo
 

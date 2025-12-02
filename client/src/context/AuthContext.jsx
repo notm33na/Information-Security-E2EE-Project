@@ -30,7 +30,11 @@ export function AuthProvider({ children }) {
       }
       return null;
     } catch (error) {
-      console.error('Token refresh failed:', error);
+      // 401 is expected if there's no valid refresh token (e.g., first visit, expired token)
+      // Only log other errors
+      if (error.response?.status !== 401) {
+        console.error('Token refresh failed:', error);
+      }
       setAccessToken(null);
       setUser(null);
       return null;
@@ -129,47 +133,112 @@ export function AuthProvider({ children }) {
       
       // Generate identity key pair
       console.log('Generating identity key pair...');
-      const { privateKey, publicKey } = await generateIdentityKeyPair();
-      
-      // Export public key for upload
-      const publicKeyJWK = await exportPublicKey(publicKey);
-      
-      // Register user
-      const response = await api.post('/auth/register', { email, password });
-      
-      if (response.data.success) {
-        const { user, accessToken: token } = response.data.data;
-        setUser(user);
-        setAccessToken(token);
-        setTokenStore(token);
-        
-        // Store private key encrypted with password
-        await storePrivateKeyEncrypted(user.id, privateKey, password);
-        console.log('✓ Identity private key stored securely');
-        
-        // Initialize session encryption key cache
-        try {
-          await initializeSessionEncryption(user.id, password);
-          console.log('✓ Session encryption initialized');
-        } catch (encError) {
-          console.warn('Failed to initialize session encryption:', encError);
-        }
-        
-        // Upload public key to server
-        try {
-          await api.post('/keys/upload', { publicIdentityKeyJWK: publicKeyJWK });
-          console.log('✓ Identity public key uploaded to server');
-        } catch (keyError) {
-          console.error('Failed to upload public key:', keyError);
-          // Non-fatal - user can upload later
-        }
-        
-        return { success: true, user };
+      let privateKey, publicKey, publicKeyJWK;
+      try {
+        const keyPair = await generateIdentityKeyPair();
+        privateKey = keyPair.privateKey;
+        publicKey = keyPair.publicKey;
+        publicKeyJWK = await exportPublicKey(publicKey);
+      } catch (keyGenError) {
+        console.error('Failed to generate identity keys:', keyGenError);
+        throw new Error('Failed to generate encryption keys. Please try again.');
       }
       
-      throw new Error(response.data.message || 'Registration failed');
+      // Register user
+      let response;
+      try {
+        response = await api.post('/auth/register', { email, password });
+      } catch (regError) {
+        // Handle registration errors with user-friendly messages
+        if (regError.response?.status === 409) {
+          throw new Error('An account with this email already exists. Please use a different email or try logging in.');
+        }
+        if (regError.response?.status === 400) {
+          const validationErrors = regError.response?.data?.errors || [];
+          if (validationErrors.length > 0) {
+            const firstError = validationErrors[0]?.msg || validationErrors[0];
+            throw new Error(firstError);
+          }
+          throw new Error(regError.response?.data?.message || 'Invalid registration data. Please check your email and password requirements.');
+        }
+        if (regError.response?.data?.message) {
+          throw new Error(regError.response.data.message);
+        }
+        throw new Error('Registration failed. Please check your connection and try again.');
+      }
+      
+      if (!response.data.success) {
+        throw new Error(response.data.message || 'Registration failed. Please try again.');
+      }
+      
+      const { user, accessToken: token } = response.data.data;
+      setUser(user);
+      setAccessToken(token);
+      setTokenStore(token);
+      
+      // Store private key encrypted with password
+      try {
+        await storePrivateKeyEncrypted(user.id, privateKey, password);
+        console.log('✓ Identity private key stored securely');
+      } catch (storeError) {
+        console.error('Failed to store private key:', storeError);
+        // This is critical - if we can't store the key, user can't decrypt messages
+        // User is already registered, so we need to inform them
+        // Don't throw - allow login but show warning
+        const storeErrorMessage = storeError.message || 'Failed to store encryption keys';
+        if (storeErrorMessage.includes('password') || storeErrorMessage.includes('encryption')) {
+          // Password-related error - this is critical
+          throw new Error('Account created but encryption key storage failed. Your password may be incorrect. Please try logging in or contact support.');
+        }
+        // Other storage errors - allow registration but warn user
+        console.warn('Key storage failed but registration succeeded. User can retry key generation later.');
+        // Continue - user can regenerate keys if needed
+      }
+      
+      // Initialize session encryption key cache
+      try {
+        await initializeSessionEncryption(user.id, password);
+        console.log('✓ Session encryption initialized');
+      } catch (encError) {
+        console.warn('Failed to initialize session encryption:', encError);
+        // Non-fatal - sessions will require password on first access
+      }
+      
+      // Upload public key to server (non-critical, can be done later)
+      try {
+        await api.post('/keys/upload', { publicIdentityKeyJWK: publicKeyJWK });
+        console.log('✓ Identity public key uploaded to server');
+      } catch (keyError) {
+        console.warn('Failed to upload public key (non-critical):', keyError);
+        // Non-fatal - user can upload later, but we should inform them
+        // Don't throw - registration was successful
+      }
+      
+      return { success: true, user };
     } catch (error) {
-      const errorMessage = error.response?.data?.message || error.message || 'Registration failed';
+      // Extract user-friendly error message
+      let errorMessage = 'Registration failed. Please try again.';
+      
+      // Prioritize user-friendly messages from server
+      if (error.response?.data?.message) {
+        errorMessage = error.response.data.message;
+      } else if (error.response?.data?.error) {
+        errorMessage = error.response.data.error;
+      } else if (error.message) {
+        // Check if it's a technical error that needs translation
+        const techError = error.message;
+        if (techError.includes('Network Error') || techError.includes('ECONNREFUSED')) {
+          errorMessage = 'Unable to connect to server. Please check your internet connection and try again.';
+        } else if (techError.includes('timeout')) {
+          errorMessage = 'Request timed out. Please try again.';
+        } else if (techError.includes('Failed to generate')) {
+          errorMessage = 'Failed to generate encryption keys. Please refresh the page and try again.';
+        } else {
+          // Use the error message if it's already user-friendly
+          errorMessage = techError;
+        }
+      }
+      
       setError(errorMessage);
       throw new Error(errorMessage);
     }

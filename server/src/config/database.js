@@ -13,25 +13,12 @@ export async function connectDatabase(mongoUri) {
       connectionUri = connectionUri.replace(/\/$/, '') + '/infosec';
     }
     
+    // Let the official MongoDB driver handle TLS and auth based on the Atlas URI.
+    // For Atlas, the URI should normally be the mongodb+srv:// string copied
+    // directly from the Atlas UI (with username, password and default db).
     await mongoose.connect(connectionUri, {
-      // Modern MongoDB driver options
       serverSelectionTimeoutMS: 5000,
-      dbName: 'infosec', // Explicitly set database name
-      // Enhanced security options
-      tls: true, // Force TLS/SSL connection
-      tlsAllowInvalidCertificates: false, // Require valid certificates
-      retryWrites: true, // Enable retryable writes
-      retryReads: true, // Enable retryable reads
-      // Connection pool settings for DoS protection
-      maxPoolSize: 10, // Maximum connections in pool
-      minPoolSize: 2, // Minimum connections in pool
-      maxIdleTimeMS: 30000, // Close idle connections after 30s
-      // Additional security: connection timeout and monitoring
-      connectTimeoutMS: 10000, // Connection timeout
-      socketTimeoutMS: 45000, // Socket timeout
-      // Authentication and encryption
-      authSource: 'admin', // Use admin database for authentication
-      compressors: ['zlib'], // Enable compression
+      dbName: 'infosec',
     });
     
     console.log('✓ Connected to MongoDB Atlas');

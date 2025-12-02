@@ -1,6 +1,6 @@
 import { MessageMeta, verifyMetadataHash } from '../models/MessageMeta.js';
 import { logMessageMetadataAccess, logMessageForwarding, logFileChunkForwarding } from '../utils/messageLogging.js';
-import { validateTimestamp, generateMessageId } from '../utils/replayProtection.js';
+import { validateTimestamp, generateMessageId, hashNonceBase64, isNonceHashUsed } from '../utils/replayProtection.js';
 import { logReplayAttempt } from '../utils/replayProtection.js';
 import { requireSenderAuthorization } from '../middlewares/authorization.middleware.js';
 
@@ -36,6 +36,30 @@ export async function relayMessage(req, res, next) {
       });
     }
 
+    // Validate and hash nonce (must exist, correct length)
+    let nonceHash;
+    try {
+      nonceHash = hashNonceBase64(envelope.nonce);
+    } catch (err) {
+      const reason = err.message || 'Invalid nonce';
+      logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, reason);
+      return res.status(400).json({
+        success: false,
+        error: reason
+      });
+    }
+
+    // Check if nonce hash has already been used in this session (replay protection)
+    const nonceAlreadyUsed = await isNonceHashUsed(envelope.sessionId, nonceHash, MessageMeta);
+    if (nonceAlreadyUsed) {
+      const reason = 'REPLAY_REJECT: Duplicate nonce detected in session';
+      logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, reason);
+      return res.status(400).json({
+        success: false,
+        error: 'Message rejected: duplicate nonce detected (replay attempt)'
+      });
+    }
+
     // Generate message ID using the message's timestamp
     const messageId = generateMessageId(envelope.sessionId, envelope.seq, envelope.timestamp);
 
@@ -48,6 +72,7 @@ export async function relayMessage(req, res, next) {
       type: envelope.type,
       timestamp: envelope.timestamp,
       seq: envelope.seq,
+      nonceHash,
       meta: envelope.meta || {},
       delivered: false
     });
@@ -92,11 +117,12 @@ export async function relayMessage(req, res, next) {
     });
   } catch (error) {
     if (error.code === 11000) {
-      // Duplicate message (replay attempt)
-      logReplayAttempt(req.body.sessionId, req.body.seq, req.body.timestamp, 'Duplicate message ID');
+      // Duplicate message (replay attempt) - can be duplicate messageId or duplicate nonceHash
+      const reason = 'REPLAY_REJECT: Duplicate nonce detected';
+      logReplayAttempt(req.body.sessionId, req.body.seq, req.body.timestamp, reason);
       return res.status(400).json({
         success: false,
-        error: 'Duplicate message detected (replay attempt)'
+        error: reason
       });
     }
     next(error);

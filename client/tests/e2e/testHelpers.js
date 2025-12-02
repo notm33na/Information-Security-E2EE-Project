@@ -10,39 +10,37 @@
 
 /**
  * Clears all IndexedDB databases used by the app
+ * Deletes the database completely to avoid version conflicts
+ * Uses aggressive timeout to prevent hanging in tests
  */
 export async function clearIndexedDB() {
-  const dbNames = ['InfosecCryptoDB'];
+  const dbName = 'InfosecCryptoDB';
   
-  for (const dbName of dbNames) {
-    try {
-      const deleteRequest = indexedDB.deleteDatabase(dbName);
-      await Promise.race([
-        new Promise((resolve, reject) => {
-          deleteRequest.onsuccess = () => resolve();
-          deleteRequest.onerror = () => reject(deleteRequest.error);
-          deleteRequest.onblocked = () => {
-            // Database is blocked, wait a bit and try again
-            setTimeout(resolve, 100);
-          };
-        }),
-        new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('IndexedDB deletion timeout')), 2000);
-        })
-      ]).catch((error) => {
-        // Ignore timeout errors - database might not exist or be in use
-        if (!error.message.includes('timeout')) {
-          throw error;
-        }
-      });
-    } catch (error) {
-      // Ignore errors if database doesn't exist or deletion fails
-      // This is safe for test cleanup
-    }
+  try {
+    // Delete the database completely - this avoids version conflicts
+    // Each module will recreate it with its proper version when needed
+    await Promise.race([
+      new Promise((resolve) => {
+        let resolved = false;
+        const deleteRequest = indexedDB.deleteDatabase(dbName);
+        
+        const cleanup = () => {
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
+        };
+        
+        deleteRequest.onsuccess = cleanup;
+        deleteRequest.onerror = cleanup;
+        deleteRequest.onblocked = cleanup; // Resolve immediately if blocked
+      }),
+      // Aggressive timeout - resolve after 100ms no matter what
+      new Promise(resolve => setTimeout(resolve, 100))
+    ]);
+  } catch (error) {
+    // Ignore all errors - this is cleanup
   }
-  
-  // Small delay to ensure cleanup completes
-  await new Promise(resolve => setTimeout(resolve, 50));
 }
 
 /**

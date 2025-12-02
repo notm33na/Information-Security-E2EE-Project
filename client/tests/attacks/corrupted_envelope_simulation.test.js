@@ -14,6 +14,7 @@ describe('Automated Corrupted Envelope Simulation (AES-GCM + HKDF)', () => {
   const sessionId = 'corrupt-session-1';
   const userId = 'alice';
   const peerId = 'bob';
+  const password = 'TestPassword123!alice';
 
   const keyBytes = new Uint8Array(32);
 
@@ -27,6 +28,7 @@ describe('Automated Corrupted Envelope Simulation (AES-GCM + HKDF)', () => {
       keyBytes.buffer,
       keyBytes.buffer,
       keyBytes.buffer,
+      password,
     );
   });
 

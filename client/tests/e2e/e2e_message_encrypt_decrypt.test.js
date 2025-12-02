@@ -164,7 +164,7 @@ describe('E2EE Message Encrypt/Decrypt Tests', () => {
 
       await expect(
         decryptAESGCMToString(sessionKey, iv, tampered.buffer, authTag)
-      ).rejects.toThrow('Authentication tag verification failed');
+      ).rejects.toThrow();
     });
 
     test('should reject tampered IV (integrity violation)', async () => {

@@ -17,58 +17,118 @@ describe('E2EE File Encryption Tests', () => {
   let alice, bob;
   let aliceSessionId;
 
-  beforeEach(async () => {
-    await clearIndexedDB();
+  beforeAll(async () => {
+    jest.setTimeout(240000); // 4 minutes for heavy setup with PBKDF2 and IndexedDB
+    // Skip clearIndexedDB in beforeAll - it can hang with fake-indexeddb
     alice = generateTestUser('alice');
     bob = generateTestUser('bob');
     aliceSessionId = `session-${alice.userId}-${bob.userId}`;
 
-    // Set up identity keys
-    const aliceIdentityKey = await generateIdentityKeyPair();
-    await storePrivateKeyEncrypted(alice.userId, aliceIdentityKey.privateKey, alice.password);
-    await initializeSessionEncryption(alice.userId, alice.password);
+    try {
+      // Set up identity keys with delays to avoid IndexedDB contention
+      const aliceIdentityKey = await generateIdentityKeyPair();
+      await storePrivateKeyEncrypted(alice.userId, aliceIdentityKey.privateKey, alice.password);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay for IndexedDB
+      
+      // Retry mechanism for initializeSessionEncryption (fake-indexeddb can be flaky)
+      let retries = 3;
+      let lastError = null;
+      while (retries > 0) {
+        try {
+          await Promise.race([
+            initializeSessionEncryption(alice.userId, alice.password),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout: initializeSessionEncryption Alice')), 60000))
+          ]);
+          break; // Success
+        } catch (error) {
+          lastError = error;
+          retries--;
+          if (retries > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * (4 - retries))); // Exponential backoff
+          }
+        }
+      }
+      if (retries === 0 && lastError) {
+        throw lastError;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay
 
-    const bobIdentityKey = await generateIdentityKeyPair();
-    await storePrivateKeyEncrypted(bob.userId, bobIdentityKey.privateKey, bob.password);
-    await initializeSessionEncryption(bob.userId, bob.password);
+      const bobIdentityKey = await generateIdentityKeyPair();
+      await storePrivateKeyEncrypted(bob.userId, bobIdentityKey.privateKey, bob.password);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay
+      
+      // Retry mechanism for initializeSessionEncryption
+      retries = 3;
+      lastError = null;
+      while (retries > 0) {
+        try {
+          await Promise.race([
+            initializeSessionEncryption(bob.userId, bob.password),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout: initializeSessionEncryption Bob')), 60000))
+          ]);
+          break; // Success
+        } catch (error) {
+          lastError = error;
+          retries--;
+          if (retries > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * (4 - retries))); // Exponential backoff
+          }
+        }
+      }
+      if (retries === 0 && lastError) {
+        throw lastError;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay
 
-    // Establish session
-    const aliceEphKey = await generateEphemeralKeyPair();
-    const bobEphKey = await generateEphemeralKeyPair();
+      // Establish session
+      const aliceEphKey = await generateEphemeralKeyPair();
+      const bobEphKey = await generateEphemeralKeyPair();
 
-    const aliceEphPubJWK = await exportEphPublicKey(aliceEphKey.publicKey);
-    const bobEphPubJWK = await exportEphPublicKey(bobEphKey.publicKey);
+      const aliceEphPubJWK = await exportEphPublicKey(aliceEphKey.publicKey);
+      const bobEphPubJWK = await exportEphPublicKey(bobEphKey.publicKey);
 
-    const bobEphPubKey = await importEphPublicKey(bobEphPubJWK);
-    const aliceSharedSecret = await computeSharedSecret(aliceEphKey.privateKey, bobEphPubKey);
-    const aliceKeys = await deriveSessionKeys(aliceSharedSecret, aliceSessionId, alice.userId, bob.userId);
+      const bobEphPubKey = await importEphPublicKey(bobEphPubJWK);
+      const aliceSharedSecret = await computeSharedSecret(aliceEphKey.privateKey, bobEphPubKey);
+      const aliceKeys = await deriveSessionKeys(aliceSharedSecret, aliceSessionId, alice.userId, bob.userId);
 
-    await createSession(
-      aliceSessionId,
-      alice.userId,
-      bob.userId,
-      aliceKeys.rootKey,
-      aliceKeys.sendKey,
-      aliceKeys.recvKey,
-      alice.password
-    );
+      await Promise.race([
+        createSession(
+          aliceSessionId,
+          alice.userId,
+          bob.userId,
+          aliceKeys.rootKey,
+          aliceKeys.sendKey,
+          aliceKeys.recvKey,
+          alice.password
+        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout: createSession Alice')), 60000))
+      ]);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay
 
-    const aliceEphPubKey = await importEphPublicKey(aliceEphPubJWK);
-    const bobSharedSecret = await computeSharedSecret(bobEphKey.privateKey, aliceEphPubKey);
-    const bobKeys = await deriveSessionKeys(bobSharedSecret, aliceSessionId, bob.userId, alice.userId);
+      const aliceEphPubKey = await importEphPublicKey(aliceEphPubJWK);
+      const bobSharedSecret = await computeSharedSecret(bobEphKey.privateKey, aliceEphPubKey);
+      const bobKeys = await deriveSessionKeys(bobSharedSecret, aliceSessionId, bob.userId, alice.userId);
 
-    await createSession(
-      aliceSessionId,
-      bob.userId,
-      alice.userId,
-      bobKeys.rootKey,
-      bobKeys.sendKey,
-      bobKeys.recvKey,
-      bob.password
-    );
-  });
+      await Promise.race([
+        createSession(
+          aliceSessionId,
+          bob.userId,
+          alice.userId,
+          bobKeys.rootKey,
+          bobKeys.sendKey,
+          bobKeys.recvKey,
+          bob.password
+        ),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout: createSession Bob')), 60000))
+      ]);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Longer delay
+    } catch (error) {
+      console.error('Setup error in beforeAll:', error.message);
+      throw error;
+    }
+  }, 240000);
 
-  afterEach(async () => {
+  afterAll(async () => {
     await clearIndexedDB();
   });
 

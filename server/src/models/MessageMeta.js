@@ -56,6 +56,10 @@ const messageMetaSchema = new mongoose.Schema({
     chunkIndex: Number,
     mimetype: String
   },
+  nonceHash: {
+    type: String,
+    index: true
+  },
   metadataHash: {
     type: String,
     index: true
@@ -75,6 +79,8 @@ messageMetaSchema.index({ sender: 1, createdAt: -1 });
 
 // Compound unique index to prevent replay attacks (same sessionId + seq + timestamp)
 messageMetaSchema.index({ sessionId: 1, seq: 1, timestamp: 1 }, { unique: true });
+// Compound unique index to prevent replay attacks using the same nonce within a session
+messageMetaSchema.index({ sessionId: 1, nonceHash: 1 }, { unique: true });
 
 /**
  * Application-level safeguard to enforce unique messageId and

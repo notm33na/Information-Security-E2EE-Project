@@ -19,6 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { writeProtectedLog } from './logIntegrity.js';
+import { recordReplayAttempt, recordSignatureFailure } from './alerting.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -58,7 +59,7 @@ function writeLog(filename, event) {
  * @param {number} timestamp - Message timestamp
  * @param {string} reason - Rejection reason
  */
-export function logReplayAttempt(sessionId, userId, seq, timestamp, reason) {
+export function logReplayAttempt(sessionId, userId, seq, timestamp, reason, ip = null) {
   writeLog('replay_attempts.log', {
     eventType: 'REPLAY_ATTEMPT',
     sessionId,
@@ -66,8 +67,14 @@ export function logReplayAttempt(sessionId, userId, seq, timestamp, reason) {
     seq,
     timestamp,
     reason,
-    action: 'REJECTED'
+    action: 'REJECTED',
+    ip
   });
+
+  // Record for alerting (if IP available)
+  if (ip) {
+    recordReplayAttempt(sessionId, ip, reason);
+  }
 }
 
 /**
@@ -86,6 +93,11 @@ export function logInvalidSignature(sessionId, userId, messageType, reason) {
     reason,
     action: 'REJECTED'
   });
+
+  // Record for alerting
+  if (userId) {
+    recordSignatureFailure(userId, sessionId, messageType, reason);
+  }
 }
 
 /**

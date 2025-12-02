@@ -13,8 +13,25 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Get HMAC key from environment or generate (should be set in production)
-const HMAC_KEY = process.env.LOG_HMAC_KEY || 'default-log-integrity-key-change-in-production';
+// Get HMAC key from environment - REQUIRED in production
+// In development/test, allow fallback for convenience, but warn
+let HMAC_KEY = process.env.LOG_HMAC_KEY;
+if (!HMAC_KEY) {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'LOG_HMAC_KEY environment variable is required in production. ' +
+      'Please set a secure random key (at least 32 bytes, hex-encoded).'
+    );
+  } else {
+    // Development/test fallback - warn but allow
+    console.warn(
+      '⚠️  WARNING: LOG_HMAC_KEY not set. Using default key. ' +
+      'This is insecure and should only be used in development/test environments.'
+    );
+    // Use a default key only in non-production
+    HMAC_KEY = 'default-log-integrity-key-change-in-production';
+  }
+}
 const LOG_ENCRYPTION_KEY = process.env.LOG_ENCRYPTION_KEY || null; // Optional encryption key for sensitive fields
 
 /**

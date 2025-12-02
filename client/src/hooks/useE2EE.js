@@ -226,12 +226,22 @@ export function useE2EE(sessionId, peerId) {
     import('socket.io-client').then(({ default: io }) => {
       const token = localStorage.getItem('accessToken') || '';
       
-      socketRef.current = io('https://localhost:8443', {
+      // In development, use Vite proxy to avoid mixed content issues
+      const wsURL = import.meta.env.DEV 
+        ? window.location.origin // Use same origin (Vite proxy will handle it)
+        : 'https://localhost:8443';
+      
+      socketRef.current = io(wsURL, {
+        transports: ['polling', 'websocket'], // Try polling first in dev (works through proxy)
         auth: {
           token
         },
         secure: true,
-        rejectUnauthorized: false // For self-signed certs in dev
+        rejectUnauthorized: false, // For self-signed certs in dev
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 3,
+        reconnectionDelayMax: 5000
       });
 
       socketRef.current.on('connect', () => {

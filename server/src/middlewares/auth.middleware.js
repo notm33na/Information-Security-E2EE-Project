@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { verifyToken } from '../utils/jwt.js';
 import { userService } from '../services/user.service.js';
 
@@ -27,7 +28,6 @@ export async function verifyTokenMiddleware(req, res, next) {
 
       // Verify token binding (IP/user-agent) if present
       if (decoded.binding) {
-        const crypto = require('crypto');
         const clientIP = req.ip || req.socket.remoteAddress || '';
         const clientUserAgent = req.headers['user-agent'] || '';
         const bindingString = `${clientIP}|${clientUserAgent}`;

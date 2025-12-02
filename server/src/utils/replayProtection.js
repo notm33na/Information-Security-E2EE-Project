@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { logReplayAttempt as coreLogReplayAttempt, logInvalidSignature as coreLogInvalidSignature, logInvalidKEPMessage as coreLogInvalidKEPMessage } from './attackLogging.js';
 
@@ -27,10 +28,10 @@ if (!fs.existsSync(LOGS_DIR)) {
  * @param {number} timestamp - Message timestamp
  * @param {string} reason - Reason for rejection
  */
-export function logReplayAttempt(sessionId, seq, timestamp, reason) {
+export function logReplayAttempt(sessionId, seq, timestamp, reason, ip = null) {
   // Delegate to core logger, which also records the userId/action.
   // We pass null for userId to preserve the original interface.
-  coreLogReplayAttempt(sessionId, null, seq, timestamp, reason);
+  coreLogReplayAttempt(sessionId, null, seq, timestamp, reason, ip);
 }
 
 /**
@@ -105,5 +106,56 @@ export function validateTimestamp(messageTimestamp, maxAge = 120000) {
 export function generateMessageId(sessionId, seq, timestamp = null) {
   const ts = timestamp || Date.now();
   return `${sessionId}:${seq}:${ts}`;
+}
+
+/**
+ * Validates nonce format and length, then returns SHA-256(nonce) as hex string.
+ * Nonce must be a base64-encoded value whose decoded length is between 12 and 32 bytes.
+ * @param {string} nonceBase64 - Base64-encoded nonce
+ * @param {number} minLength - Minimum allowed length in bytes (default: 12)
+ * @param {number} maxLength - Maximum allowed length in bytes (default: 32)
+ * @returns {string} Hex-encoded SHA-256 nonce hash
+ */
+export function hashNonceBase64(nonceBase64, minLength = 12, maxLength = 32) {
+  if (!nonceBase64 || typeof nonceBase64 !== 'string') {
+    throw new Error('Nonce is required');
+  }
+
+  const nonceBuffer = Buffer.from(nonceBase64, 'base64');
+
+  if (nonceBuffer.length < minLength || nonceBuffer.length > maxLength) {
+    throw new Error(
+      `Invalid nonce length: ${nonceBuffer.length} (expected ${minLength}-${maxLength} bytes)`
+    );
+  }
+
+  return crypto.createHash('sha256').update(nonceBuffer).digest('hex');
+}
+
+/**
+ * Checks if a nonce hash has already been used in a session (server-side replay protection)
+ * @param {string} sessionId - Session identifier
+ * @param {string} nonceHash - Hex-encoded SHA-256 hash of the nonce
+ * @param {Object} MessageMetaModel - Mongoose model for MessageMeta
+ * @returns {Promise<boolean>} True if nonce hash has been seen before in this session
+ */
+export async function isNonceHashUsed(sessionId, nonceHash, MessageMetaModel) {
+  if (!sessionId || !nonceHash || !MessageMetaModel) {
+    throw new Error('sessionId, nonceHash, and MessageMetaModel are required');
+  }
+
+  try {
+    const existing = await MessageMetaModel.findOne({
+      sessionId: sessionId,
+      nonceHash: nonceHash
+    });
+
+    return !!existing;
+  } catch (error) {
+    // If database query fails, assume nonce is not used to avoid blocking legitimate messages
+    // Log the error for investigation
+    console.error('Error checking nonce hash uniqueness:', error);
+    return false;
+  }
 }
 

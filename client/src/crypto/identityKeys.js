@@ -12,7 +12,7 @@
  */
 
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 1;
+const DB_VERSION = 3; // Must match the highest version used by any module (clientLogger uses 3)
 const STORE_NAME = 'identityKeys';
 
 /**
@@ -28,9 +28,11 @@ async function openDB() {
 
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+      // Create identityKeys store if it doesn't exist
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME, { keyPath: 'userId' });
       }
+      // Note: Other stores (sessions, clientLogs) are created by their respective modules
     };
   });
 }
@@ -66,6 +68,13 @@ export async function generateIdentityKeyPair() {
  * @returns {Promise<CryptoKey>}
  */
 async function deriveKeyFromPassword(password, salt) {
+  // Allow tests to lower iteration count via environment for performance,
+  // while keeping production-strength defaults.
+  const iterations =
+    (typeof process !== 'undefined' &&
+      process.env &&
+      parseInt(process.env.CRYPTO_PBKDF2_ITERATIONS || '', 10)) ||
+    100000;
   const encoder = new TextEncoder();
   const passwordKey = await crypto.subtle.importKey(
     'raw',
@@ -79,7 +88,7 @@ async function deriveKeyFromPassword(password, salt) {
     {
       name: 'PBKDF2',
       salt: salt,
-      iterations: 100000,
+      iterations,
       hash: 'SHA-256'
     },
     passwordKey,

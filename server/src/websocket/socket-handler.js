@@ -3,8 +3,10 @@ import { verifyToken } from '../utils/jwt.js';
 import { userService } from '../services/user.service.js';
 import { KEPMessage } from '../models/KEPMessage.js';
 import { MessageMeta } from '../models/MessageMeta.js';
-import { logInvalidKEPMessage, logReplayAttempt, validateTimestamp, generateMessageId } from '../utils/replayProtection.js';
+import { logInvalidKEPMessage, logReplayAttempt, validateTimestamp, generateMessageId, hashNonceBase64, isNonceHashUsed } from '../utils/replayProtection.js';
 import { logMessageForwarding, logFileChunkForwarding, logReplayDetected } from '../utils/messageLogging.js';
+import { securityLogger, authLogger } from '../utils/logger.js';
+import { logKeyExchangeAttempt } from '../utils/attackLogging.js';
 
 /**
  * Initializes and configures Socket.IO server with JWT authentication
@@ -277,9 +279,12 @@ export function initializeWebSocket(httpsServer) {
           return;
         }
 
+        // Get client IP for alerting
+        const clientIP = socket.handshake.address || socket.request.socket.remoteAddress || 'unknown';
+
         // Validate timestamp
         if (!validateTimestamp(timestamp)) {
-          logReplayAttempt(sessionId, seq, timestamp, 'Timestamp out of validity window');
+          logReplayAttempt(sessionId, seq, timestamp, 'Timestamp out of validity window', clientIP);
           socket.emit('error', {
             message: 'KEP_INIT rejected: timestamp out of validity window',
             timestamp: new Date().toISOString()
@@ -301,6 +306,17 @@ export function initializeWebSocket(httpsServer) {
         });
 
         await kepMessage.save();
+
+        // Log KEP_INIT received
+        logKeyExchangeAttempt(sessionId, socket.data.user.id, to, 'KEP_INIT', true);
+        securityLogger.info({
+          event: 'kep_init_received',
+          userId: socket.data.user.id,
+          sessionId,
+          from: socket.data.user.id,
+          to,
+          timestamp: new Date().toISOString()
+        });
 
         // Forward to recipient if online
         const sockets = await io.fetchSockets();
@@ -333,7 +349,7 @@ export function initializeWebSocket(httpsServer) {
           timestamp: new Date().toISOString()
         });
       }
-    });
+    }));
 
     // KEP:RESPONSE event handler - requires authentication
     socket.on('kep:response', requireAuth(socket, async (data) => {
@@ -369,9 +385,12 @@ export function initializeWebSocket(httpsServer) {
           return;
         }
 
+        // Get client IP for alerting
+        const clientIP = socket.handshake.address || socket.request.socket.remoteAddress || 'unknown';
+
         // Validate timestamp
         if (!validateTimestamp(timestamp)) {
-          logReplayAttempt(sessionId, seq, timestamp, 'Timestamp out of validity window');
+          logReplayAttempt(sessionId, seq, timestamp, 'Timestamp out of validity window', clientIP);
           socket.emit('error', {
             message: 'KEP_RESPONSE rejected: timestamp out of validity window',
             timestamp: new Date().toISOString()
@@ -393,6 +412,17 @@ export function initializeWebSocket(httpsServer) {
         });
 
         await kepMessage.save();
+
+        // Log KEP_RESPONSE received
+        logKeyExchangeAttempt(sessionId, socket.data.user.id, to, 'KEP_RESPONSE', true);
+        securityLogger.info({
+          event: 'kep_response_received',
+          userId: socket.data.user.id,
+          sessionId,
+          from: socket.data.user.id,
+          to,
+          timestamp: new Date().toISOString()
+        });
 
         // Forward to recipient if online
         const sockets = await io.fetchSockets();
@@ -434,7 +464,7 @@ export function initializeWebSocket(httpsServer) {
           });
         }
       }
-    });
+    }));
 
     // MSG:SEND event handler - Encrypted message sending - requires authentication
     socket.on('msg:send', requireAuth(socket, async (envelope) => {
@@ -480,6 +510,34 @@ export function initializeWebSocket(httpsServer) {
           return;
         }
 
+        // Validate and hash nonce (must exist, correct length)
+        let nonceHash;
+        try {
+          nonceHash = hashNonceBase64(envelope.nonce);
+        } catch (err) {
+          const reason = err.message || 'Invalid nonce';
+          logReplayAttempt(sessionId, seq, timestamp, reason);
+          logReplayDetected(socket.data.user.id, sessionId, seq, reason);
+          socket.emit('error', {
+            message: reason,
+            timestamp: new Date().toISOString()
+          });
+          return;
+        }
+
+        // Check if nonce hash has already been used in this session (replay protection)
+        const nonceAlreadyUsed = await isNonceHashUsed(sessionId, nonceHash, MessageMeta);
+        if (nonceAlreadyUsed) {
+          const reason = 'REPLAY_REJECT: Duplicate nonce detected in session';
+          logReplayAttempt(sessionId, seq, timestamp, reason);
+          logReplayDetected(socket.data.user.id, sessionId, seq, reason);
+          socket.emit('error', {
+            message: 'Message rejected: duplicate nonce detected (replay attempt)',
+            timestamp: new Date().toISOString()
+          });
+          return;
+        }
+
         // Generate message ID using the message's timestamp
         const messageId = generateMessageId(sessionId, seq, timestamp);
 
@@ -492,11 +550,24 @@ export function initializeWebSocket(httpsServer) {
           type,
           timestamp,
           seq,
+          nonceHash,
           meta: envelope.meta || {},
           delivered: false
         });
 
         await messageMeta.save();
+
+        // Log message accepted
+        securityLogger.info({
+          event: 'message_accepted',
+          userId: socket.data.user.id,
+          sessionId,
+          seq,
+          type,
+          receiver,
+          messageId,
+          timestamp: new Date().toISOString()
+        });
 
         // Forward to recipient if online
         const sockets = await io.fetchSockets();
@@ -523,9 +594,10 @@ export function initializeWebSocket(httpsServer) {
         });
       } catch (error) {
         if (error.code === 11000) {
-          // Duplicate message (replay attempt)
-          logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, 'Duplicate message ID');
-          logReplayDetected(socket.data.user.id, envelope.sessionId, envelope.seq, 'Duplicate message ID');
+          // Duplicate message (replay attempt) - can be duplicate messageId or duplicate nonceHash
+          const reason = 'REPLAY_REJECT: Duplicate nonce detected';
+          logReplayAttempt(envelope.sessionId, envelope.seq, envelope.timestamp, reason);
+          logReplayDetected(socket.data.user.id, envelope.sessionId, envelope.seq, reason);
           socket.emit('error', {
             message: 'Message rejected: duplicate message (replay attempt)',
             timestamp: new Date().toISOString()
@@ -538,7 +610,7 @@ export function initializeWebSocket(httpsServer) {
           });
         }
       }
-    });
+    }));
 
     // KEY_UPDATE event handler (Phase 6: Forward Secrecy)
     socket.on('key:update', async (keyUpdateMessage) => {
@@ -575,6 +647,18 @@ export function initializeWebSocket(httpsServer) {
         // Store key update metadata (server does not decrypt or verify signatures)
         // Client-side signature verification happens on recipient
         const messageId = `${sessionId}:KEY_UPDATE:${rotationSeq}:${timestamp}`;
+        
+        // Log key rotation event
+        securityLogger.info({
+          event: 'key_rotation',
+          userId: socket.data.user.id,
+          sessionId,
+          from,
+          to,
+          rotationSeq,
+          timestamp: new Date().toISOString(),
+          messageId
+        });
         
         // Forward to recipient if online
         const sockets = await io.fetchSockets();

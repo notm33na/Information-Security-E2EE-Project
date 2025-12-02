@@ -84,7 +84,7 @@ export async function decryptFile(metaEnvelope, chunkEnvelopes, sessionId, userI
     const blob = new Blob([combinedBuffer], { type: mimetype });
 
     // 8. Clear decrypted chunks from memory after blob creation
-    const { clearPlaintextAfterDecryption } = await import('../utils/memorySecurity.js');
+    const { clearPlaintextAfterDecryption } = await import('./memorySecurity.js');
     for (const chunk of decryptedChunks) {
       clearPlaintextAfterDecryption(chunk);
     }

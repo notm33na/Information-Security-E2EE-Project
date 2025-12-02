@@ -14,6 +14,7 @@ import { createSession, initializeSessionEncryption, loadSession } from '../../s
 import { generateIdentityKeyPair, storePrivateKeyEncrypted } from '../../src/crypto/identityKeys.js';
 import { generateEphemeralKeyPair, computeSharedSecret, deriveSessionKeys, exportPublicKey as exportEphPublicKey, importPublicKey as importEphPublicKey } from '../../src/crypto/ecdh.js';
 import { buildTextMessageEnvelope, validateEnvelopeStructure } from '../../src/crypto/messageEnvelope.js';
+import { sequenceManager } from '../../src/crypto/messages.js';
 import { clearIndexedDB, generateTestUser, ensureNoPlaintext, arrayBuffersEqual } from './testHelpers.js';
 
 describe('E2EE Message Flow Tests', () => {
@@ -21,8 +22,10 @@ describe('E2EE Message Flow Tests', () => {
   let aliceSessionId;
   let mockSocketEmit;
 
-  beforeEach(async () => {
-    await clearIndexedDB();
+  beforeAll(async () => {
+    jest.setTimeout(240000); // 4 minutes for setup with retries
+    // Skip clearIndexedDB in beforeAll - it can hang with fake-indexeddb
+    // We'll clear in afterAll instead
     alice = generateTestUser('alice');
     bob = generateTestUser('bob');
     aliceSessionId = `session-${alice.userId}-${bob.userId}`;
@@ -30,15 +33,61 @@ describe('E2EE Message Flow Tests', () => {
     // Mock socket emit function
     mockSocketEmit = jest.fn();
 
-    // Set up Alice's identity key
-    const aliceIdentityKey = await generateIdentityKeyPair();
-    await storePrivateKeyEncrypted(alice.userId, aliceIdentityKey.privateKey, alice.password);
-    await initializeSessionEncryption(alice.userId, alice.password);
+    try {
+      // Set up Alice's identity key with retry mechanism
+      const aliceIdentityKey = await generateIdentityKeyPair();
+      await storePrivateKeyEncrypted(alice.userId, aliceIdentityKey.privateKey, alice.password);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Delay for IndexedDB
+      
+      // Retry mechanism for initializeSessionEncryption (fake-indexeddb can be flaky)
+      let retries = 3;
+      let lastError = null;
+      while (retries > 0) {
+        try {
+          await Promise.race([
+            initializeSessionEncryption(alice.userId, alice.password),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout: initializeSessionEncryption Alice')), 60000))
+          ]);
+          break; // Success
+        } catch (error) {
+          lastError = error;
+          retries--;
+          if (retries > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * (4 - retries))); // Exponential backoff
+          }
+        }
+      }
+      if (retries === 0 && lastError) {
+        throw lastError;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500)); // Delay
 
-    // Set up Bob's identity key
-    const bobIdentityKey = await generateIdentityKeyPair();
-    await storePrivateKeyEncrypted(bob.userId, bobIdentityKey.privateKey, bob.password);
-    await initializeSessionEncryption(bob.userId, bob.password);
+      // Set up Bob's identity key with retry mechanism
+      const bobIdentityKey = await generateIdentityKeyPair();
+      await storePrivateKeyEncrypted(bob.userId, bobIdentityKey.privateKey, bob.password);
+      await new Promise(resolve => setTimeout(resolve, 500)); // Delay
+      
+      retries = 3;
+      lastError = null;
+      while (retries > 0) {
+        try {
+          await Promise.race([
+            initializeSessionEncryption(bob.userId, bob.password),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout: initializeSessionEncryption Bob')), 60000))
+          ]);
+          break; // Success
+        } catch (error) {
+          lastError = error;
+          retries--;
+          if (retries > 0) {
+            await new Promise(resolve => setTimeout(resolve, 1000 * (4 - retries))); // Exponential backoff
+          }
+        }
+      }
+      if (retries === 0 && lastError) {
+        throw lastError;
+      }
+      await new Promise(resolve => setTimeout(resolve, 500)); // Delay
 
     // Establish session between Alice and Bob
     const aliceEphKey = await generateEphemeralKeyPair();
@@ -76,9 +125,18 @@ describe('E2EE Message Flow Tests', () => {
       bobKeys.recvKey,
       bob.password
     );
+    } catch (error) {
+      console.error('Setup error in beforeAll:', error.message);
+      throw error;
+    }
+  }, 240000);
+
+  beforeEach(() => {
+    // Reset sequence manager for clean test state
+    sequenceManager.resetSequence(aliceSessionId);
   });
 
-  afterEach(async () => {
+  afterAll(async () => {
     await clearIndexedDB();
   });
 

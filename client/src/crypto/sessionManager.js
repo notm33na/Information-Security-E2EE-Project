@@ -55,7 +55,7 @@ export function triggerInvalidSignature(sessionId, message) {
 }
 
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 2; // Incremented for encrypted session keys
+const DB_VERSION = 3; // Must match the highest version used by any module (clientLogger uses 3)
 const SESSIONS_STORE = 'sessions';
 const SESSION_ENCRYPTION_STORE = 'sessionEncryptionKeys'; // Store encryption metadata
 
@@ -72,12 +72,14 @@ async function openDB() {
 
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
+      // Create stores if they don't exist (idempotent)
       if (!db.objectStoreNames.contains(SESSIONS_STORE)) {
         db.createObjectStore(SESSIONS_STORE, { keyPath: 'sessionId' });
       }
       if (!db.objectStoreNames.contains(SESSION_ENCRYPTION_STORE)) {
         db.createObjectStore(SESSION_ENCRYPTION_STORE, { keyPath: 'userId' });
       }
+      // Note: Other stores (identityKeys, clientLogs) are created by their respective modules
     };
   });
 }
@@ -90,12 +92,19 @@ const sessionEncryptionKeyCache = new Map(); // userId -> { key: CryptoKey, expi
 
 /**
  * Derives session encryption key from password
- * Uses same PBKDF2 parameters as identity key encryption for consistency
+ * Uses same PBKDF2 parameters as identity key encryption for consistency.
+ * Tests may lower the iteration count via CRYPTO_PBKDF2_ITERATIONS env var
+ * for performance while keeping the production default strong.
  * @param {string} password - User password
  * @param {Uint8Array} salt - Salt for key derivation
  * @returns {Promise<CryptoKey>}
  */
 async function deriveSessionEncryptionKey(password, salt) {
+  const iterations =
+    (typeof process !== 'undefined' &&
+      process.env &&
+      parseInt(process.env.CRYPTO_PBKDF2_ITERATIONS || '', 10)) ||
+    100000;
   const encoder = new TextEncoder();
   const passwordKey = await crypto.subtle.importKey(
     'raw',
@@ -109,7 +118,7 @@ async function deriveSessionEncryptionKey(password, salt) {
     {
       name: 'PBKDF2',
       salt: salt,
-      iterations: 100000,
+      iterations,
       hash: 'SHA-256'
     },
     passwordKey,
@@ -138,28 +147,115 @@ async function getSessionEncryptionKey(userId, password) {
 
   // Load or generate salt
   const db = await openDB();
-  const transaction = db.transaction([SESSION_ENCRYPTION_STORE], 'readwrite');
-  const store = transaction.objectStore(SESSION_ENCRYPTION_STORE);
-
-  let encryptionData = await new Promise((resolve, reject) => {
-    const request = store.get(userId);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-
-  if (!encryptionData) {
-    // Generate new salt and store
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    encryptionData = {
-      userId: userId,
-      salt: Array.from(salt),
-      createdAt: new Date().toISOString()
-    };
-    await new Promise((resolve, reject) => {
-      const request = store.put(encryptionData);
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
+  let encryptionData;
+  
+  try {
+    encryptionData = await new Promise((resolve, reject) => {
+      const transaction = db.transaction([SESSION_ENCRYPTION_STORE], 'readwrite');
+      const store = transaction.objectStore(SESSION_ENCRYPTION_STORE);
+      
+      // Set up transaction handlers first to avoid race conditions
+      let resolved = false;
+      let requestResult = null;
+      
+      const completeHandler = () => {
+        if (!resolved) {
+          resolved = true;
+          resolve(requestResult);
+        }
+      };
+      const errorHandler = () => {
+        if (!resolved) {
+          resolved = true;
+          reject(transaction.error || new Error('Transaction error'));
+        }
+      };
+      
+      transaction.oncomplete = completeHandler;
+      transaction.onerror = errorHandler;
+      
+      const request = store.get(userId);
+      request.onsuccess = () => {
+        requestResult = request.result;
+        // If transaction is already complete, resolve immediately
+        if (transaction.readyState === 'done') {
+          if (!resolved) {
+            resolved = true;
+            resolve(requestResult);
+          }
+        }
+        // Otherwise, wait for transaction.oncomplete
+      };
+      request.onerror = () => {
+        if (!resolved) {
+          resolved = true;
+          reject(request.error);
+        }
+      };
     });
+
+    if (!encryptionData) {
+      // Generate new salt and store
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      encryptionData = {
+        userId: userId,
+        salt: Array.from(salt),
+        createdAt: new Date().toISOString()
+      };
+      
+      await new Promise((resolve, reject) => {
+        const transaction = db.transaction([SESSION_ENCRYPTION_STORE], 'readwrite');
+        const store = transaction.objectStore(SESSION_ENCRYPTION_STORE);
+        
+        // Set up transaction handlers first to avoid race conditions
+        let resolved = false;
+        const completeHandler = () => {
+          if (!resolved) {
+            resolved = true;
+            resolve();
+          }
+        };
+        const errorHandler = () => {
+          if (!resolved) {
+            resolved = true;
+            reject(transaction.error || new Error('Transaction error'));
+          }
+        };
+        
+        transaction.oncomplete = completeHandler;
+        transaction.onerror = errorHandler;
+        
+        const request = store.put(encryptionData);
+        request.onsuccess = () => {
+          // If transaction is already complete, resolve immediately
+          if (transaction.readyState === 'done') {
+            if (!resolved) {
+              resolved = true;
+              resolve();
+            }
+          }
+          // Otherwise, wait for transaction.oncomplete
+        };
+        request.onerror = () => {
+          if (!resolved) {
+            resolved = true;
+            reject(request.error);
+          }
+        };
+      });
+    }
+  } finally {
+    // Explicitly close database connection (important for fake-indexeddb)
+    // Add a small delay to ensure transaction cleanup completes
+    // This helps fake-indexeddb properly clean up before the next operation
+    await new Promise(resolve => setTimeout(resolve, 50));
+    try {
+      if (db && typeof db.close === 'function') {
+        db.close();
+      }
+    } catch (error) {
+      // Ignore errors when closing - database might already be closed
+    }
   }
 
   // Derive key
@@ -318,6 +414,9 @@ export async function createSession(sessionId, userId, peerId, rootKey, sendKey,
       encrypted: true, // Flag to indicate encrypted storage
       lastSeq: 0,
       lastTimestamp: Date.now(),
+      // Track recently used nonce hashes (client-side replay protection).
+      // Stored as an array of hex-encoded SHA-256(nonce) values.
+      usedNonceHashes: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -647,6 +746,74 @@ export async function getUserSessions(userId) {
     return decryptedSessions;
   } catch (error) {
     throw new Error(`Failed to get user sessions: ${error.message}`);
+  }
+}
+
+/**
+ * Checks whether a nonce hash has already been used for a given session.
+ * Nonces are tracked as SHA-256(nonceBytes) hex strings in the session record.
+ * @param {string} sessionId - Session identifier
+ * @param {string} nonceHash - Hex-encoded SHA-256 hash of the nonce
+ * @returns {Promise<boolean>} True if nonce hash has been seen before
+ */
+export async function isNonceUsed(sessionId, nonceHash) {
+  const db = await openDB();
+  const transaction = db.transaction([SESSIONS_STORE], 'readonly');
+  const store = transaction.objectStore(SESSIONS_STORE);
+
+  const session = await new Promise((resolve, reject) => {
+    const request = store.get(sessionId);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  if (!session || !Array.isArray(session.usedNonceHashes)) {
+    return false;
+  }
+
+  return session.usedNonceHashes.includes(nonceHash);
+}
+
+/**
+ * Stores a nonce hash for a session, keeping only the most recent 200 entries.
+ * This prevents unbounded growth while still detecting recent replays.
+ * @param {string} sessionId - Session identifier
+ * @param {string} nonceHash - Hex-encoded SHA-256 hash of the nonce
+ * @returns {Promise<void>}
+ */
+export async function storeUsedNonce(sessionId, nonceHash) {
+  const db = await openDB();
+  const transaction = db.transaction([SESSIONS_STORE], 'readwrite');
+  const store = transaction.objectStore(SESSIONS_STORE);
+
+  const session = await new Promise((resolve, reject) => {
+    const request = store.get(sessionId);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+
+  if (!session) {
+    // If the session does not exist, nothing to track.
+    return;
+  }
+
+  let used = Array.isArray(session.usedNonceHashes)
+    ? session.usedNonceHashes.slice()
+    : [];
+
+  if (!used.includes(nonceHash)) {
+    used.push(nonceHash);
+    // Keep only the last 200 nonces to bound storage.
+    if (used.length > 200) {
+      used = used.slice(used.length - 200);
+    }
+    session.usedNonceHashes = used;
+
+    await new Promise((resolve, reject) => {
+      const request = store.put(session);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
   }
 }
 

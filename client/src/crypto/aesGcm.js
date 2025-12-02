@@ -6,6 +6,7 @@
  */
 
 import { base64ToArrayBuffer } from './signatures.js';
+import { createUserFriendlyError } from '../utils/cryptoErrors.js';
 
 /**
  * Generates a random 96-bit (12-byte) IV for AES-GCM
@@ -70,7 +71,8 @@ export async function encryptAESGCM(key, plaintext) {
       authTag
     };
   } catch (error) {
-    throw new Error(`AES-GCM encryption failed: ${error.message}`);
+    // Provide user-friendly error message
+    throw createUserFriendlyError(error, 'encryption');
   }
 }
 
@@ -117,10 +119,14 @@ export async function decryptAESGCM(key, iv, ciphertext, authTag) {
 
     return decrypted;
   } catch (error) {
+    // Provide user-friendly error message
+    // OperationError typically indicates authentication tag verification failure
     if (error.name === 'OperationError') {
-      throw new Error('Decryption failed: Authentication tag verification failed');
+      const authError = new Error('Authentication tag verification failed');
+      authError.name = 'OperationError';
+      throw createUserFriendlyError(authError, 'decryption');
     }
-    throw new Error(`AES-GCM decryption failed: ${error.message}`);
+    throw createUserFriendlyError(error, 'decryption');
   }
 }
 

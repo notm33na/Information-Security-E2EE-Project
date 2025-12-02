@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { loadKeys } from '../config/keys.js';
 
@@ -69,7 +70,6 @@ export function generateAccessToken(userId, email, ipAddress = null, userAgent =
   // Create binding hash from IP and user-agent to prevent token theft/replay
   let bindingHash = null;
   if (ipAddress || userAgent) {
-    const crypto = require('crypto');
     const bindingString = `${ipAddress || ''}|${userAgent || ''}`;
     bindingHash = crypto.createHash('sha256').update(bindingString).digest('hex').substring(0, 16); // 16 chars for efficiency
   }
