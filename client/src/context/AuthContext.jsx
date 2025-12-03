@@ -10,6 +10,9 @@ const AuthContext = createContext(null);
  * AuthProvider component
  * Manages authentication state and provides auth methods
  */
+// Password cache for session establishment (encrypted in memory, cleared on logout)
+const passwordCache = new Map(); // userId -> { password: string, expiresAt: number }
+
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [accessToken, setAccessToken] = useState(null);
@@ -31,9 +34,14 @@ export function AuthProvider({ children }) {
       return null;
     } catch (error) {
       // 401 is expected if there's no valid refresh token (e.g., first visit, expired token)
-      // Only log other errors
-      if (error.response?.status !== 401) {
-        console.error('Token refresh failed:', error);
+      // Network errors are expected if backend is not running
+      if (error.response?.status !== 401 && !error.code === 'ECONNREFUSED') {
+        // Only log non-network, non-401 errors
+        if (error.response) {
+          console.error('Token refresh failed:', error.response.data);
+        } else if (!error.message?.includes('Network Error')) {
+          console.error('Token refresh failed:', error.message);
+        }
       }
       setAccessToken(null);
       setUser(null);
@@ -199,6 +207,8 @@ export function AuthProvider({ children }) {
       try {
         await initializeSessionEncryption(user.id, password);
         console.log('✓ Session encryption initialized');
+        // Cache password for session establishment
+        cachePassword(user.id, password);
       } catch (encError) {
         console.warn('Failed to initialize session encryption:', encError);
         // Non-fatal - sessions will require password on first access
@@ -245,6 +255,27 @@ export function AuthProvider({ children }) {
   };
 
   /**
+   * Caches password for session establishment (1 hour)
+   */
+  const cachePassword = useCallback((userId, password) => {
+    passwordCache.set(userId, {
+      password,
+      expiresAt: Date.now() + 60 * 60 * 1000 // 1 hour
+    });
+  }, []);
+
+  /**
+   * Gets cached password if available and not expired
+   */
+  const getCachedPassword = useCallback((userId) => {
+    const cached = passwordCache.get(userId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.password;
+    }
+    return null;
+  }, []);
+
+  /**
    * Logout function
    */
   const logout = async () => {
@@ -262,6 +293,15 @@ export function AuthProvider({ children }) {
       // Clear session encryption cache on logout
       if (user) {
         clearSessionEncryptionCache(user.id);
+        passwordCache.delete(user.id); // Clear password cache
+        
+        // Clear persisted messages
+        try {
+          const { clearAllUserMessages } = await import('../utils/messageStorage.js');
+          await clearAllUserMessages(user.id);
+        } catch (error) {
+          console.warn('Failed to clear user messages:', error);
+        }
       }
       setUser(null);
       setAccessToken(null);
@@ -289,6 +329,8 @@ export function AuthProvider({ children }) {
     logout,
     refreshAccessToken,
     updateAccessToken,
+    cachePassword,
+    getCachedPassword,
     clearError: () => setError(null)
   };
 

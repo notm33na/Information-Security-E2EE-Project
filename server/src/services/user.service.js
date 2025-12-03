@@ -208,6 +208,60 @@ class UserService {
       isActive: true
     });
   }
+
+  /**
+   * Changes user password
+   * @param {string} userId - User ID
+   * @param {string} oldPassword - Current password
+   * @param {string} newPassword - New password
+   * @returns {Promise<void>}
+   */
+  async changePassword(userId, oldPassword, newPassword) {
+    // Validate new password strength
+    const { validatePassword } = await import('../utils/passwordValidation.js');
+    const passwordValidation = validatePassword(newPassword);
+    if (!passwordValidation.valid) {
+      const error = new Error(`Password validation failed: ${passwordValidation.errors.join(', ')}`);
+      error.name = 'PasswordValidationError';
+      error.errors = passwordValidation.errors;
+      throw error;
+    }
+
+    // Get user with password hash
+    const user = await User.findById(userId).select('+passwordHash');
+    if (!user || !user.passwordHash) {
+      throw new Error('User not found');
+    }
+
+    // Verify old password
+    const isOldPasswordValid = await bcrypt.compare(oldPassword, user.passwordHash);
+    if (!isOldPasswordValid) {
+      const error = new Error('Current password is incorrect');
+      error.name = 'InvalidPasswordError';
+      throw error;
+    }
+
+    // Hash new password
+    const newPasswordHash = await bcrypt.hash(newPassword, 12);
+
+    // Update password
+    await User.findByIdAndUpdate(userId, {
+      passwordHash: newPasswordHash
+    });
+  }
+
+  /**
+   * Gets all refresh tokens for a user
+   * @param {string} userId - User ID
+   * @returns {Promise<Array>} Array of refresh token objects
+   */
+  async getRefreshTokens(userId) {
+    const user = await User.findById(userId).select('+refreshTokens');
+    if (!user) {
+      return [];
+    }
+    return user.refreshTokens || [];
+  }
 }
 
 export const userService = new UserService();

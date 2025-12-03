@@ -74,9 +74,11 @@ export const api = {
      * @returns {Promise<Object>} Response object
      */
     retrieve: async (userId, token) => {
-      return await request(app)
-        .get(`/api/keys/${userId}`)
-        .set('Authorization', `Bearer ${token}`);
+      const req = request(app).get(`/api/keys/${userId}`);
+      if (token) {
+        req.set('Authorization', `Bearer ${token}`);
+      }
+      return await req;
     }
   }
 };

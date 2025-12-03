@@ -173,7 +173,8 @@ describe('Metadata Storage Tests', () => {
           receiver: testUser2.id,
           type: 'MSG',
           timestamp: baseTimestamp + i * 1000, // Ensure unique timestamps
-          seq: i + 1
+          seq: i + 1,
+          nonceHash: `nonce-hash-${i}` // Unique nonceHash to avoid duplicate key error
         });
         savePromises.push(messageMeta.save());
       }
@@ -201,7 +202,8 @@ describe('Metadata Storage Tests', () => {
           receiver: testUser2.id,
           type: 'MSG',
           timestamp: baseTimestamp + i * 1000, // Ensure unique timestamps
-          seq: i + 1
+          seq: i + 1,
+          nonceHash: `nonce-hash-page-${i}` // Unique nonceHash to avoid duplicate key error
         });
         await messageMeta.save();
       }
@@ -231,7 +233,8 @@ describe('Metadata Storage Tests', () => {
         type: 'MSG',
         timestamp: Date.now(),
         seq: 1,
-        delivered: true
+        delivered: true,
+        nonceHash: 'nonce-hash-delivered' // Unique nonceHash to avoid duplicate key error
       });
       await delivered.save();
 
@@ -243,7 +246,8 @@ describe('Metadata Storage Tests', () => {
         type: 'MSG',
         timestamp: Date.now(),
         seq: 2,
-        delivered: false
+        delivered: false,
+        nonceHash: 'nonce-hash-pending' // Unique nonceHash to avoid duplicate key error
       });
       await pending.save();
 

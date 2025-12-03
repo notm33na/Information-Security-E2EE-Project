@@ -115,23 +115,30 @@ export async function getPublicKey(req, res, next) {
       });
     }
 
-    // Verify key integrity before returning
-    const keyString = JSON.stringify(publicKey.publicIdentityKeyJWK, Object.keys(publicKey.publicIdentityKeyJWK).sort());
-    const currentHash = crypto.createHash('sha256').update(keyString).digest('hex');
-    
-    if (currentHash !== publicKey.keyHash) {
-      // Key has been tampered with
-      logEvent('PUBLIC_KEY_TAMPER_DETECTED', userId, 'Public key integrity check failed on retrieval', {
-        userId: userId,
-        expectedHash: publicKey.keyHash,
-        actualHash: currentHash
-      });
+    // Verify key integrity before returning (only if keyHash exists)
+    if (publicKey.keyHash) {
+      const keyString = JSON.stringify(publicKey.publicIdentityKeyJWK, Object.keys(publicKey.publicIdentityKeyJWK).sort());
+      const currentHash = crypto.createHash('sha256').update(keyString).digest('hex');
       
-      return res.status(500).json({
-        success: false,
-        error: 'Public key integrity violation',
-        message: 'Public key verification failed. Please contact support.'
-      });
+      if (currentHash !== publicKey.keyHash) {
+        // Key has been tampered with
+        logEvent('PUBLIC_KEY_TAMPER_DETECTED', userId, 'Public key integrity check failed on retrieval', {
+          userId: userId,
+          expectedHash: publicKey.keyHash,
+          actualHash: currentHash
+        });
+        
+        return res.status(500).json({
+          success: false,
+          error: 'Public key integrity violation',
+          message: 'Public key verification failed. Please contact support.'
+        });
+      }
+    } else {
+      // If keyHash doesn't exist, set it now (for backward compatibility)
+      const keyString = JSON.stringify(publicKey.publicIdentityKeyJWK, Object.keys(publicKey.publicIdentityKeyJWK).sort());
+      publicKey.keyHash = crypto.createHash('sha256').update(keyString).digest('hex');
+      await publicKey.save();
     }
 
     res.json({

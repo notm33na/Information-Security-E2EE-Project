@@ -108,7 +108,18 @@ api.interceptors.response.use(
       console.error('API Error:', error.response.data);
     } else if (error.request) {
       // Request made but no response received
-      console.error('Network Error:', error.message);
+      // Check if it's a connection refused error
+      if (error.code === 'ECONNREFUSED' || error.message.includes('Network Error')) {
+        console.error('Network Error: Backend server is not running or not accessible.');
+        console.error('Please ensure the backend server is running on https://localhost:8443');
+        // Don't spam console with network errors - only log once
+        if (!window.__backendConnectionErrorLogged) {
+          console.error('To start the backend server, run: cd server && npm run dev');
+          window.__backendConnectionErrorLogged = true;
+        }
+      } else {
+        console.error('Network Error:', error.message);
+      }
     } else {
       // Something else happened
       console.error('Error:', error.message);

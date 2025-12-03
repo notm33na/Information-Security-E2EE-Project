@@ -35,9 +35,9 @@ describe('LOG_HMAC_KEY Requirement Tests', () => {
       delete process.env.NODE_ENV;
     }
     
-    // Clear module cache to force re-import
-    const logIntegrityPath = path.join(__dirname, '../src/utils/logIntegrity.js');
-    delete require.cache[logIntegrityPath];
+    // Note: ES modules don't support require.cache
+    // Module cache clearing is not possible in ES modules
+    // Tests should handle module state differently if needed
   });
 
   test('should fail in production mode without LOG_HMAC_KEY', () => {

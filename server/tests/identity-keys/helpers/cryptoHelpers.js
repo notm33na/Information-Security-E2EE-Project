@@ -6,8 +6,19 @@
 import crypto from 'crypto';
 
 // Use webcrypto if available (Node.js 15+)
-const webcrypto = (globalThis.crypto?.subtle) || (crypto.webcrypto?.subtle) || crypto.subtle;
-const getRandomValues = (globalThis.crypto?.getRandomValues) || (crypto.webcrypto?.getRandomValues) || crypto.getRandomValues;
+const webcrypto = (globalThis.crypto?.subtle) || (crypto.webcrypto?.subtle);
+
+// Get random values function - must be called on crypto object
+function getRandomValues(arr) {
+  if (globalThis.crypto?.getRandomValues) {
+    return globalThis.crypto.getRandomValues(arr);
+  } else if (crypto.webcrypto?.getRandomValues) {
+    return crypto.webcrypto.getRandomValues(arr);
+  } else {
+    // Fallback for Node.js < 15
+    return crypto.randomFillSync(arr);
+  }
+}
 
 /**
  * Generates a test identity key pair
@@ -90,6 +101,11 @@ export async function importPrivateKeyJWK(jwk) {
  * @returns {Promise<{encryptedData: Uint8Array, salt: Uint8Array, iv: Uint8Array}>}
  */
 export async function encryptPrivateKey(privateKey, password) {
+  // Validate password
+  if (!password || password.length === 0) {
+    throw new Error('Password cannot be empty');
+  }
+  
   // Export private key to JWK
   const jwk = await exportPrivateKeyJWK(privateKey);
   

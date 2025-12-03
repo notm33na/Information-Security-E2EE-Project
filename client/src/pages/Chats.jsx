@@ -80,7 +80,9 @@ export default function Chats() {
                 >
                   <ChatListItem
                     {...chat}
-                    onClick={() => navigate(`/chat/${chat.sessionId}`)}
+                    onClick={() => navigate(`/chat/${chat.sessionId}`, { 
+                      state: { peerId: chat.peerId } 
+                    })}
                   />
                 </div>
               ))}

@@ -13,9 +13,11 @@ import { getRecvKey } from './sessionManager.js';
  * @param {Object} metaEnvelope - FILE_META envelope
  * @param {Array<Object>} chunkEnvelopes - Array of FILE_CHUNK envelopes
  * @param {string} sessionId - Session identifier
+ * @param {string} userId - User ID for key access
+ * @param {Function} onProgress - Optional progress callback (chunkIndex, totalChunks, progress)
  * @returns {Promise<{blob: Blob, filename: string, mimetype: string}>}
  */
-export async function decryptFile(metaEnvelope, chunkEnvelopes, sessionId, userId = null) {
+export async function decryptFile(metaEnvelope, chunkEnvelopes, sessionId, userId = null, onProgress = null) {
   try {
     // 1. Get receive key (with userId for encrypted key access)
     // Load session first to get userId if not provided
@@ -39,6 +41,11 @@ export async function decryptFile(metaEnvelope, chunkEnvelopes, sessionId, userI
     const metadata = JSON.parse(metadataJson);
 
     const { filename, size, totalChunks, mimetype } = metadata;
+    
+    // Report initial progress
+    if (onProgress) {
+      onProgress(0, totalChunks, 0, 0, 0);
+    }
 
     // 3. Sort chunks by index
     const sortedChunks = chunkEnvelopes
@@ -52,6 +59,7 @@ export async function decryptFile(metaEnvelope, chunkEnvelopes, sessionId, userI
 
     // 5. Decrypt all chunks
     const decryptedChunks = [];
+    const startTime = Date.now();
 
     for (let i = 0; i < sortedChunks.length; i++) {
       const chunkEnvelope = sortedChunks[i];
@@ -68,6 +76,19 @@ export async function decryptFile(metaEnvelope, chunkEnvelopes, sessionId, userI
 
       const decryptedChunk = await decryptAESGCM(recvKey, chunkIV, chunkCiphertext, chunkAuthTag);
       decryptedChunks.push(decryptedChunk);
+
+      // Report progress
+      if (onProgress) {
+        const progress = ((i + 1) / totalChunks) * 100;
+        const elapsed = (Date.now() - startTime) / 1000; // seconds
+        // Calculate processed bytes (sum of all decrypted chunks so far)
+        const processedBytes = decryptedChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) + decryptedChunk.byteLength;
+        const speed = elapsed > 0 ? processedBytes / elapsed : 0; // bytes per second
+        const remainingBytes = Math.max(0, size - processedBytes);
+        const timeRemaining = speed > 0 ? remainingBytes / speed : 0; // seconds
+
+        onProgress(i + 1, totalChunks, progress, speed, timeRemaining);
+      }
     }
 
     // 6. Combine chunks into single ArrayBuffer

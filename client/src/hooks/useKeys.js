@@ -72,7 +72,7 @@ export function useKeys() {
             type: 'ECC P-256',
             status: 'active',
             fingerprint: fingerprint,
-            createdAt: publicKeyInfo?.createdAt || new Date().toISOString(),
+            createdAt: publicKeyInfo?.createdAt || publicKeyInfo?.updatedAt || new Date().toISOString(),
             expiresAt: 'Never',
             publicKeyJWK: publicKeyInfo?.publicIdentityKeyJWK
           });

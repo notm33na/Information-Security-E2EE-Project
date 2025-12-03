@@ -7,13 +7,15 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import { setupSecurityMiddleware } from '../src/middleware/security.js';
 import { authErrorHandler } from '../src/middlewares/auth.middleware.js';
-import authRouter from '../src/routes/auth.routes.js';
-import keysRouter from '../src/routes/keys.routes.js';
+import authRouter from './routes/auth.routes.js'; // Use test routes without rate limiting
+import keysRouter from './routes/keys.routes.js'; // Use test routes without rate limiting
 
 const app = express();
 
-// Trust proxy
-app.set('trust proxy', true);
+// Trust proxy (disabled in test to avoid rate limiter warnings)
+if (process.env.NODE_ENV !== 'test') {
+  app.set('trust proxy', true);
+}
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -23,7 +25,7 @@ app.use(cookieParser());
 // Security middleware
 setupSecurityMiddleware(app);
 
-// Routes
+// Routes (test routes have rate limiting disabled)
 app.use('/api/auth', authRouter);
 app.use('/api/keys', keysRouter);
 

@@ -428,6 +428,128 @@ export async function deactivate(req, res, next) {
 }
 
 /**
+ * Change user password
+ * POST /api/auth/change-password
+ */
+export async function changePassword(req, res, next) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Not authenticated'
+      });
+    }
+
+    const { oldPassword, newPassword } = req.body;
+
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields',
+        message: 'Both old password and new password are required'
+      });
+    }
+
+    // Change password
+    await userService.changePassword(req.user.id, oldPassword, newPassword);
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+  } catch (error) {
+    if (error.name === 'PasswordValidationError') {
+      return res.status(400).json({
+        success: false,
+        error: 'Password validation failed',
+        message: error.errors?.join(', ') || error.message
+      });
+    }
+    if (error.name === 'InvalidPasswordError') {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid password',
+        message: 'Current password is incorrect'
+      });
+    }
+    next(error);
+  }
+}
+
+/**
+ * Get active sessions (refresh tokens)
+ * GET /api/auth/sessions
+ */
+export async function getSessions(req, res, next) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Not authenticated'
+      });
+    }
+
+    const tokens = await userService.getRefreshTokens(req.user.id);
+    
+    // Get current refresh token from cookie to identify current session
+    const currentToken = req.cookies?.refreshToken;
+
+    const sessions = tokens.map(token => ({
+      id: token._id?.toString() || token.token.substring(0, 8),
+      userAgent: token.userAgent || 'Unknown',
+      ip: token.ip || 'Unknown',
+      createdAt: token.createdAt,
+      isCurrent: token.token === currentToken
+    }));
+
+    res.json({
+      success: true,
+      data: { sessions }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Revoke a session (refresh token)
+ * DELETE /api/auth/sessions/:tokenId
+ */
+export async function revokeSession(req, res, next) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Not authenticated'
+      });
+    }
+
+    const { tokenId } = req.params;
+    const tokens = await userService.getRefreshTokens(req.user.id);
+    const tokenToRevoke = tokens.find(t => 
+      (t._id?.toString() === tokenId) || (t.token.substring(0, 8) === tokenId)
+    );
+
+    if (!tokenToRevoke) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found'
+      });
+    }
+
+    // Remove the token
+    await userService.removeRefreshToken(req.user.id, tokenToRevoke.token);
+
+    res.json({
+      success: true,
+      message: 'Session revoked successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
  * Reactivate user account (placeholder)
  * POST /api/auth/reactivate
  */

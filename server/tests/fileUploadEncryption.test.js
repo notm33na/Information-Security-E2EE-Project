@@ -228,6 +228,7 @@ describe('File Upload Encryption Tests', () => {
           type: 'FILE_CHUNK',
           timestamp: baseTimestamp + i * 1000, // Ensure unique timestamps
           seq: i + 1,
+          nonceHash: `nonce-hash-chunk-${i}`, // Unique nonceHash to avoid duplicate key error
           meta: {
             chunkIndex: i,
             totalChunks

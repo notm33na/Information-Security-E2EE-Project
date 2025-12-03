@@ -8,7 +8,10 @@ import {
   refresh,
   getMe,
   deactivate,
-  reactivate
+  reactivate,
+  changePassword,
+  getSessions,
+  revokeSession
 } from '../controllers/auth.controller.js';
 import { verifyTokenMiddleware, requireAuth } from '../middlewares/auth.middleware.js';
 
@@ -98,6 +101,42 @@ router.post(
 
 // Reactivate account route (placeholder)
 router.post('/reactivate', reactivate);
+
+// Change password route (requires auth)
+router.post(
+  '/change-password',
+  verifyTokenMiddleware,
+  requireAuth,
+  body('oldPassword').notEmpty().withMessage('Current password is required'),
+  body('newPassword')
+    .isLength({ min: 8 })
+    .withMessage('Password must be at least 8 characters long')
+    .matches(/[A-Z]/)
+    .withMessage('Password must contain at least one uppercase letter')
+    .matches(/[a-z]/)
+    .withMessage('Password must contain at least one lowercase letter')
+    .matches(/[0-9]/)
+    .withMessage('Password must contain at least one number')
+    .matches(/[^A-Za-z0-9]/)
+    .withMessage('Password must contain at least one special character'),
+  changePassword
+);
+
+// Get active sessions route (requires auth)
+router.get(
+  '/sessions',
+  verifyTokenMiddleware,
+  requireAuth,
+  getSessions
+);
+
+// Revoke session route (requires auth)
+router.delete(
+  '/sessions/:tokenId',
+  verifyTokenMiddleware,
+  requireAuth,
+  revokeSession
+);
 
 export default router;
 

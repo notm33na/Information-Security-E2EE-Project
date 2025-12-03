@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useChat } from '../hooks/useChat';
 import { io } from 'socket.io-client';
@@ -9,9 +9,13 @@ import { ChatBubble } from '../components/chat/ChatBubble';
 import { MessageInput } from '../components/chat/MessageInput';
 import { SecurityAlert } from '../components/shared/SecurityAlert';
 import { FileCard } from '../components/shared/FileCard';
+import { FileProgress } from '../components/chat/FileProgress';
+import { ErrorMessage } from '../components/chat/ErrorMessage';
+import { loadSession } from '../crypto/sessionManager.js';
 
 export function Chat() {
   const { sessionId } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const { user, accessToken } = useAuth();
   const [socket, setSocket] = useState(null);
@@ -20,10 +24,51 @@ export function Chat() {
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
-  const { messages, files, isDecrypting, sendMessage, sendFile, securityEvents } = useChat(
+  // Get peerId from route state, URL params, or session
+  const [peerId, setPeerId] = useState(location.state?.peerId || null);
+
+  const { 
+    messages, 
+    files, 
+    isDecrypting, 
+    sendMessage, 
+    sendFile, 
+    securityEvents,
+    isEstablishingSession,
+    sessionError,
+    fileProgress,
+    errors,
+    clearError
+  } = useChat(
     sessionId,
     socket,
+    peerId
   );
+
+  // Load session to get peerId if not already set
+  useEffect(() => {
+    if (!sessionId || !user?.id || peerId) return;
+
+    const loadSessionInfo = async () => {
+      try {
+        // Try to load session (may fail if password not cached, that's OK)
+        try {
+          const session = await loadSession(sessionId, user.id);
+          if (session && session.peerId) {
+            setPeerId(session.peerId);
+          }
+        } catch (loadError) {
+          // Session doesn't exist or password not cached - will be established
+          // peerId will need to be provided via route state or URL param
+          console.log('Session not found, peerId needed for establishment');
+        }
+      } catch (error) {
+        console.warn('Could not load session info:', error);
+      }
+    };
+
+    loadSessionInfo();
+  }, [sessionId, user?.id, peerId]);
 
   // Initialize WebSocket connection
   useEffect(() => {
@@ -182,6 +227,25 @@ export function Chat() {
         <span className="text-xs text-success">Messages are end-to-end encrypted</span>
       </div>
 
+      {/* Session Establishment Status */}
+      {isEstablishingSession && (
+        <div className="flex items-center justify-center gap-2 py-3 bg-primary/5 border-b border-primary/10">
+          <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
+          <span className="text-xs text-primary">Establishing secure connection...</span>
+        </div>
+      )}
+
+      {sessionError && (
+        <div className="px-4 pt-4">
+          <SecurityAlert
+            severity="high"
+            title="Session Establishment Failed"
+            description={sessionError}
+            timestamp={new Date().toLocaleString()}
+          />
+        </div>
+      )}
+
       {/* Security Events */}
       {securityEvents && securityEvents.length > 0 && (
         <div className="px-4 pt-4 space-y-2">
@@ -198,20 +262,54 @@ export function Chat() {
         </div>
       )}
 
+      {/* Error Messages */}
+      {errors && errors.length > 0 && (
+        <div className="px-4 pt-4 space-y-2">
+          {errors.map((error) => (
+            <ErrorMessage
+              key={error.id}
+              title={error.title}
+              message={error.message}
+              variant={error.variant}
+              onDismiss={() => clearError(error.id)}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* File Progress */}
+      {fileProgress && (
+        <div className="px-4 pt-4">
+          <FileProgress
+            filename={fileProgress.filename}
+            progress={fileProgress.progress}
+            speed={fileProgress.speed}
+            timeRemaining={fileProgress.timeRemaining}
+            type={fileProgress.type}
+            onCancel={() => {
+              // Cancel file operation (if needed)
+              console.log('File operation cancelled');
+            }}
+          />
+        </div>
+      )}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-1 scrollbar-thin">
-        {messages.map((msg, i) => (
-          <ChatBubble
-            key={msg.id}
-            message={msg.type === 'text' ? msg.content : '[File]'}
-            timestamp={new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            isSender={msg.sender === user.id}
-            isRead={true}
-            isEncrypted={true}
-            className="animate-fade-in"
-            style={{ animationDelay: `${i * 50}ms` }}
-          />
-        ))}
+        {messages
+          .sort((a, b) => (a.seq || 0) - (b.seq || 0)) // Ensure sorted by sequence
+          .map((msg, i) => (
+            <ChatBubble
+              key={msg.id}
+              message={msg.type === 'text' ? msg.content : '[File]'}
+              timestamp={new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              isSender={msg.sender === user.id}
+              isRead={true}
+              isEncrypted={true}
+              className="animate-fade-in"
+              style={{ animationDelay: `${i * 50}ms` }}
+            />
+          ))}
 
         {files.map((file, i) => (
           <div key={file.id} className="flex w-full mb-3 animate-fade-in justify-start">

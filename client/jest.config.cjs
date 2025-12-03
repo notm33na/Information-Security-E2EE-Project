@@ -1,10 +1,10 @@
 module.exports = {
   testEnvironment: 'jsdom',
   rootDir: '.',
-  testMatch: ['**/tests/e2e/**/*.test.js', '**/tests/attacks/**/*.test.js'],
+  testMatch: ['**/tests/e2e/**/*.test.js', '**/tests/attacks/**/*.test.js', '**/tests/file-*.test.js'],
   moduleFileExtensions: ['js', 'jsx', 'json'],
-  setupFiles: ['<rootDir>/jest.globals.js'], // Run FIRST, before any modules
-  setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
+  setupFiles: ['<rootDir>/jest.globals.cjs'], // Run FIRST, before any modules
+  setupFilesAfterEnv: ['<rootDir>/jest.setup.cjs'],
   transform: {
     '^.+\\.[jt]sx?$': 'babel-jest',
   },

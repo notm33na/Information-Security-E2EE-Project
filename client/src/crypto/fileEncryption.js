@@ -18,9 +18,11 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB maximum file size
  * @param {string} sessionId - Session identifier
  * @param {string} sender - Sender user ID
  * @param {string} receiver - Receiver user ID
+ * @param {string} userId - User ID for key access
+ * @param {Function} onProgress - Optional progress callback (chunkIndex, totalChunks, progress)
  * @returns {Promise<{fileMetaEnvelope: Object, chunkEnvelopes: Array<Object>}>}
  */
-export async function encryptFile(file, sessionId, sender, receiver, userId = null) {
+export async function encryptFile(file, sessionId, sender, receiver, userId = null, onProgress = null) {
   try {
     // 1. Read file as ArrayBuffer
     const fileBuffer = await file.arrayBuffer();
@@ -65,6 +67,7 @@ export async function encryptFile(file, sessionId, sender, receiver, userId = nu
 
     // 5. Encrypt file chunks
     const chunkEnvelopes = [];
+    const startTime = Date.now();
 
     for (let i = 0; i < totalChunks; i++) {
       const start = i * CHUNK_SIZE;
@@ -89,6 +92,18 @@ export async function encryptFile(file, sessionId, sender, receiver, userId = nu
       );
 
       chunkEnvelopes.push(chunkEnvelope);
+
+      // Report progress
+      if (onProgress) {
+        const progress = ((i + 1) / totalChunks) * 100;
+        const elapsed = (Date.now() - startTime) / 1000; // seconds
+        const processedBytes = end;
+        const speed = processedBytes / elapsed; // bytes per second
+        const remainingBytes = fileSize - processedBytes;
+        const timeRemaining = remainingBytes / speed; // seconds
+
+        onProgress(i + 1, totalChunks, progress, speed, timeRemaining);
+      }
     }
 
     console.log(`✓ File encrypted: ${file.name} (${totalChunks} chunks)`);

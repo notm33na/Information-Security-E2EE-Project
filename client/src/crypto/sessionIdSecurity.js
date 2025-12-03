@@ -4,24 +4,21 @@
  * to prevent session key access via compromised session IDs
  */
 
-import crypto from 'crypto';
-
 /**
  * Generates a cryptographically secure session ID
  * @param {string} userId - User ID
  * @param {string} peerId - Peer user ID
- * @returns {string} Secure session ID
+ * @returns {Promise<string>} Secure session ID
  */
-export function generateSecureSessionId(userId, peerId) {
+export async function generateSecureSessionId(userId, peerId) {
   // Create deterministic but secure session ID
   const encoder = new TextEncoder();
   const data = encoder.encode(`${userId}:${peerId}:${Date.now()}`);
   
   // Hash to create unpredictable session ID
-  return crypto.subtle.digest('SHA-256', data).then(hash => {
-    const hashArray = Array.from(new Uint8Array(hash));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 32);
-  });
+  const hash = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hash));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 32);
 }
 
 /**
