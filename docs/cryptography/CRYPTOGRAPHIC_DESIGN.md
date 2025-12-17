@@ -11,9 +11,6 @@
 1. [Overview](#overview)
 2. [Key Materials](#key-materials)
 3. [Key Generation Process](#key-generation-process)
-4. [Key Generation Diagram](#key-generation-diagram)
-5. [Security Considerations](#security-considerations)
-6. [Missing Details](#missing-details)
 
 ---
 
@@ -237,3 +234,4 @@ All cryptographic operations are performed client-side. The server acts as a rel
      ```
 
 ---
+
