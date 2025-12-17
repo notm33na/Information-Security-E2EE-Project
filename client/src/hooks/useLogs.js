@@ -36,6 +36,24 @@ export function useLogs() {
         
         const allLogs = [];
         
+        // Fetch server-side security logs from MongoDB
+        try {
+          const serverResponse = await api.get('/logs', {
+            params: {
+              limit: 100
+            }
+          });
+          
+          if (serverResponse.data.success && serverResponse.data.data.logs) {
+            const serverLogs = serverResponse.data.data.logs;
+            console.log(`[useLogs] Found ${serverLogs.length} server logs`);
+            allLogs.push(...serverLogs);
+          }
+        } catch (serverErr) {
+          console.warn('[useLogs] Failed to fetch server logs:', serverErr.message);
+          // Continue with client logs even if server fetch fails
+        }
+        
         // Get client-side security logs from IndexedDB
         // Try with userId first, then without if no results
         let clientLogs = await getLogs({
@@ -92,10 +110,21 @@ export function useLogs() {
               else if (additional.scenario) message += ` (Scenario: ${additional.scenario})`;
               break;
               case 'invalid_signature':
-                level = 'error';
-                title = 'Invalid Signature';
-                message = `Signature verification failed: ${metadata.reason || 'Invalid signature'}`;
-                if (metadata.messageType) message += ` (Message: ${metadata.messageType})`;
+                // Check if this is a MITM attack simulation
+                if (metadata.isSimulation && metadata.attackType) {
+                  const attackResult = metadata.flow?.result;
+                  level = attackResult?.success ? 'error' : 'warning';
+                  title = 'MITM Attack Simulation';
+                  message = `MITM attack ${attackResult?.success ? 'SUCCEEDED' : 'BLOCKED'}: ${metadata.attackType}`;
+                  if (attackResult?.reason) {
+                    message += ` - ${attackResult.reason}`;
+                  }
+                } else {
+                  level = 'error';
+                  title = 'Invalid Signature';
+                  message = `Signature verification failed: ${metadata.reason || 'Invalid signature'}`;
+                  if (metadata.messageType) message += ` (Message: ${metadata.messageType})`;
+                }
                 break;
               case 'decryption_error':
                 level = 'error';
@@ -216,29 +245,45 @@ export function useLogs() {
     return () => clearInterval(interval);
   }, [user?.id]);
 
-  return { 
-    logs, 
-    loading, 
-    error,
-    refetch: async () => {
-      if (user?.id) {
-        try {
-          const allLogs = [];
-          
-          // Refetch client-side logs
-          let clientLogs = await getLogs({
-            userId: user.id,
+  const refetch = async () => {
+    if (!user?.id) return;
+    
+    try {
+      setLoading(true);
+      setError(null);
+      
+      const allLogs = [];
+      
+      // Refetch server-side security logs from MongoDB
+      try {
+        const serverResponse = await api.get('/logs', {
+          params: {
             limit: 100
-          });
-          
-          // If no logs found with userId filter, try without filter
-          if (clientLogs.length === 0) {
-            clientLogs = await getLogs({
-              limit: 100
-            });
           }
-          
-          clientLogs.forEach(log => {
+        });
+        
+        if (serverResponse.data.success && serverResponse.data.data.logs) {
+          const serverLogs = serverResponse.data.data.logs;
+          allLogs.push(...serverLogs);
+        }
+      } catch (serverErr) {
+        console.warn('[useLogs] Failed to refetch server logs:', serverErr.message);
+      }
+      
+      // Refetch client-side logs
+      let clientLogs = await getLogs({
+        userId: user.id,
+        limit: 100
+      });
+      
+      // If no logs found with userId filter, try without filter
+      if (clientLogs.length === 0) {
+        clientLogs = await getLogs({
+          limit: 100
+        });
+      }
+      
+      clientLogs.forEach(log => {
             try {
               const event = log.event;
               const metadata = log.metadata || {};
@@ -272,9 +317,20 @@ export function useLogs() {
                   else if (additional.scenario) message += ` (Scenario: ${additional.scenario})`;
                   break;
                 case 'invalid_signature':
-                  level = 'error';
-                  title = 'Invalid Signature';
-                  message = `Signature verification failed: ${metadata.reason || 'Invalid signature'}`;
+                  // Check if this is a MITM attack simulation
+                  if (metadata.isSimulation && metadata.attackType) {
+                    const attackResult = metadata.flow?.result;
+                    level = attackResult?.success ? 'error' : 'warning';
+                    title = 'MITM Attack Simulation';
+                    message = `MITM attack ${attackResult?.success ? 'SUCCEEDED' : 'BLOCKED'}: ${metadata.attackType}`;
+                    if (attackResult?.reason) {
+                      message += ` - ${attackResult.reason}`;
+                    }
+                  } else {
+                    level = 'error';
+                    title = 'Invalid Signature';
+                    message = `Signature verification failed: ${metadata.reason || 'Invalid signature'}`;
+                  }
                   break;
                 case 'decryption_error':
                   level = 'error';
@@ -358,9 +414,17 @@ export function useLogs() {
           setLogs(allLogs.slice(0, 100));
         } catch (err) {
           console.error('Failed to refetch logs:', err);
+          setError(err.message);
+        } finally {
+          setLoading(false);
         }
-      }
-    }
+      };
+
+  return { 
+    logs, 
+    loading, 
+    error,
+    refetch
   };
 }
 

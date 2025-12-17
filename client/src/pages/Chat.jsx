@@ -2,16 +2,19 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useChat } from '../hooks/useChat';
+import { useFileUpload } from '../hooks/useFileUpload';
 import { io } from 'socket.io-client';
 import { ArrowLeft, Lock, Shield, Download } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { ChatBubble } from '../components/chat/ChatBubble';
 import { MessageInput } from '../components/chat/MessageInput';
+import { FilePickerDialog } from '../components/chat/FilePickerDialog';
 import { SecurityAlert } from '../components/shared/SecurityAlert';
 import { FileCard } from '../components/shared/FileCard';
 import { FileProgress } from '../components/chat/FileProgress';
 import { ErrorMessage } from '../components/chat/ErrorMessage';
 import { loadSession } from '../crypto/sessionManager.js';
+import { getBackendWebSocketURL } from '../config/backend.js';
 
 export function Chat() {
   const { sessionId } = useParams();
@@ -21,8 +24,10 @@ export function Chat() {
   const [socket, setSocket] = useState(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [sending, setSending] = useState(false);
+  const [showFilePicker, setShowFilePicker] = useState(false);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
+  const { downloadFile } = useFileUpload();
 
   // Get peerId from route state, URL params, or session
   const [peerId, setPeerId] = useState(location.state?.peerId || null);
@@ -54,19 +59,37 @@ export function Chat() {
 
     const loadSessionInfo = async () => {
       try {
-        // Try to load session (may fail if password not cached, that's OK)
+        // First try to get session from backend
+        try {
+          const api = (await import('../services/api')).default;
+          const response = await api.get(`/sessions/${sessionId}`);
+          
+          if (response.data.success && response.data.data.session) {
+            const session = response.data.data.session;
+            if (session.peerId) {
+              console.log(`[Chat] Loaded peerId ${session.peerId} from backend for session ${sessionId}`);
+              setPeerId(session.peerId);
+              return;
+            }
+          }
+        } catch (apiError) {
+          console.log('[Chat] Could not fetch session from backend, trying local storage:', apiError.message);
+        }
+        
+        // Fallback: Try to load session from local storage (may fail if password not cached, that's OK)
         try {
           const session = await loadSession(sessionId, user.id);
           if (session && session.peerId) {
+            console.log(`[Chat] Loaded peerId ${session.peerId} from local storage for session ${sessionId}`);
             setPeerId(session.peerId);
           }
         } catch (loadError) {
           // Session doesn't exist or password not cached - will be established
           // peerId will need to be provided via route state or URL param
-          console.log('Session not found, peerId needed for establishment');
+          console.log('[Chat] Session not found locally, peerId needed for establishment');
         }
       } catch (error) {
-        console.warn('Could not load session info:', error);
+        console.warn('[Chat] Could not load session info:', error);
       }
     };
 
@@ -80,7 +103,15 @@ export function Chat() {
     // In development, use Vite proxy to avoid mixed content issues
     const wsURL = import.meta.env.DEV 
       ? window.location.origin // Use same origin (Vite proxy will handle it)
-      : 'https://localhost:8443';
+      : getBackendWebSocketURL();
+    
+    // Close existing socket if any
+    if (socket) {
+      console.log('[Chat] Closing existing socket before creating new one');
+      socket.removeAllListeners();
+      socket.disconnect();
+      socket.close();
+    }
     
     const newSocket = io(wsURL, {
       transports: ['polling', 'websocket'], // Try polling first in dev (works through proxy)
@@ -138,6 +169,9 @@ export function Chat() {
       if (newSocket._keepAliveInterval) {
         clearInterval(newSocket._keepAliveInterval);
       }
+      // Properly clean up socket
+      newSocket.removeAllListeners();
+      newSocket.disconnect();
       newSocket.close();
     };
   }, [accessToken, sessionId]);
@@ -182,7 +216,48 @@ export function Chat() {
   };
 
   const handleAttach = () => {
-    fileInputRef.current?.click();
+    // Show file picker dialog to choose between new file or existing file
+    setShowFilePicker(true);
+  };
+
+  const handleSelectFromStorage = async (file) => {
+    if (!file) {
+      throw new Error('No file selected');
+    }
+
+    if (!file.fileId) {
+      throw new Error('This file cannot be sent. Only files uploaded to storage can be shared in chats.');
+    }
+
+    try {
+      setSending(true);
+      
+      // Download and decrypt the file from storage
+      const { blob, filename, mimetype } = await downloadFile(file.fileId);
+      
+      // Convert blob to File object for sending
+      const fileToSend = new File([blob], filename, { type: mimetype });
+      
+      // Send the file (it will be re-encrypted with chat session key)
+      await sendFile(fileToSend);
+      setSelectedFile(null);
+    } catch (error) {
+      console.error('Failed to send file from storage:', error);
+      const errorMessage = error.message || 'Failed to prepare file from storage';
+      alert(errorMessage);
+      throw error;
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleSelectNewFile = (file) => {
+    setShowFilePicker(false);
+    if (file) {
+      setSelectedFile(file);
+    } else {
+      fileInputRef.current?.click();
+    }
   };
 
   const handleSendFile = async () => {
@@ -356,9 +431,11 @@ export function Chat() {
             />
           ))}
 
-        {files.map((file, i) => (
-          <div key={file.id} className="flex w-full mb-3 animate-fade-in justify-start">
-            <div className="max-w-[80%] sm:max-w-[70%] lg:max-w-[60%] rounded-2xl px-4 py-3 bg-secondary text-secondary-foreground">
+        {files.map((file, i) => {
+          const isSender = file.sender === user.id;
+          return (
+          <div key={file.id} className={`flex w-full mb-3 animate-fade-in ${isSender ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[80%] sm:max-w-[70%] lg:max-w-[60%] rounded-2xl px-4 py-3 ${isSender ? 'bg-primary text-primary-foreground' : 'bg-secondary text-secondary-foreground'}`}>
               <div className="flex items-center gap-3 p-2.5 rounded-lg mb-2 bg-background/50">
                 <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-primary/20">
                   <Download className="w-5 h-5 text-primary" />
@@ -386,7 +463,8 @@ export function Chat() {
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
 
         {isDecrypting && (
           <div className="flex w-full justify-center mb-3">
@@ -435,6 +513,14 @@ export function Chat() {
           onAttach={handleAttach}
         />
       </div>
+
+      {/* File Picker Dialog */}
+      <FilePickerDialog
+        open={showFilePicker}
+        onOpenChange={setShowFilePicker}
+        onSelectFile={handleSelectFromStorage}
+        onSelectNewFile={handleSelectNewFile}
+      />
     </div>
   );
 }

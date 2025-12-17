@@ -14,19 +14,28 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils.js";
 import { Button } from "../ui/button";
+import { useSecurityAlerts } from "../../hooks/useSecurityAlerts";
+import { useReadAlerts } from "../../hooks/useReadAlerts";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
   { icon: MessageSquare, label: "Chats", href: "/chats" },
   { icon: Upload, label: "Files", href: "/files" },
   { icon: Key, label: "Keys", href: "/keys" },
-  { icon: AlertTriangle, label: "Alerts", href: "/alerts", badge: "3" },
+  { icon: AlertTriangle, label: "Alerts", href: "/alerts" },
   { icon: FileText, label: "Logs", href: "/logs" },
   { icon: Settings, label: "Settings", href: "/settings" },
 ];
 
 export function Sidebar({ collapsed = false, onToggle, className }) {
   const location = useLocation();
+  const { alerts = [] } = useSecurityAlerts();
+  const { isRead } = useReadAlerts();
+  
+  // Count unread alerts (critical/high severity)
+  const unreadAlertCount = alerts.filter(a => 
+    (a.severity === 'critical' || a.severity === 'high') && !isRead(a.id)
+  ).length;
 
   return (
     <aside
@@ -78,9 +87,9 @@ export function Sidebar({ collapsed = false, onToggle, className }) {
               {!collapsed && (
                 <span className="font-medium animate-fade-in">{item.label}</span>
               )}
-              {item.badge && !collapsed && (
+              {item.href === "/alerts" && unreadAlertCount > 0 && !collapsed && (
                 <span className="ml-auto px-2 py-0.5 text-xs font-medium bg-destructive/20 text-destructive rounded-full animate-fade-in">
-                  {item.badge}
+                  {unreadAlertCount > 9 ? '9+' : unreadAlertCount}
                 </span>
               )}
               {isActive && (

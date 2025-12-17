@@ -33,40 +33,76 @@ export function useFiles() {
         setLoading(true);
         setError(null);
         
-        // Fetch pending messages which may include file metadata
+        // Try to fetch from files endpoint first (for uploaded files)
         let response;
         try {
-          response = await api.get(`/messages/pending/${user.id}`);
+          response = await api.get('/files');
         } catch (err) {
-          // Handle 403 Forbidden - user might not have access or token issue
-          if (err.response?.status === 403) {
-            console.warn('Access denied to pending messages. User may need to re-authenticate.');
-            setError('Access denied. Please refresh the page.');
-            setFiles([]);
-            setLoading(false);
+          // If files endpoint doesn't exist or fails, fall back to messages
+          if (err.response?.status === 404 || err.response?.status === 403) {
+            // Fall back to fetching from messages
+            try {
+              response = await api.get(`/messages/pending/${user.id}`);
+            } catch (msgErr) {
+              if (msgErr.response?.status === 403) {
+                console.warn('Access denied. User may need to re-authenticate.');
+                setError('Access denied. Please refresh the page.');
+                setFiles([]);
+                setLoading(false);
+                return;
+              }
+              throw msgErr;
+            }
+            
+            if (response.data.success) {
+              const messages = response.data.data.messages || [];
+              const fileMessages = messages.filter(msg => msg.type === 'FILE_META');
+              
+              const formattedFiles = fileMessages.map(msg => ({
+                id: msg.messageId,
+                name: msg.meta?.filename || 'Unknown file',
+                size: msg.meta?.size || 0,
+                type: msg.meta?.mimetype || 'application/octet-stream',
+                encrypted: true,
+                uploadedAt: formatFileTimestamp(msg.createdAt || msg.timestamp),
+                uploadedAtRaw: msg.createdAt || msg.timestamp,
+                sessionId: msg.sessionId,
+                messageId: msg.messageId
+              }));
+
+              formattedFiles.sort((a, b) => {
+                const timeA = new Date(a.uploadedAtRaw).getTime();
+                const timeB = new Date(b.uploadedAtRaw).getTime();
+                return timeB - timeA;
+              });
+
+              setFiles(formattedFiles);
+            }
             return;
           }
           throw err;
         }
         
         if (response.data.success) {
-          const messages = response.data.data.messages || [];
-          
-          // Filter for FILE_META type messages
-          const fileMessages = messages.filter(msg => msg.type === 'FILE_META');
+          // Files endpoint response
+          const fileList = response.data.data.files || [];
           
           // Transform to file format
-          const formattedFiles = fileMessages.map(msg => ({
-            id: msg.messageId,
-            name: msg.meta?.filename || 'Unknown file',
-            size: msg.meta?.size || 0,
-            type: msg.meta?.mimetype || 'application/octet-stream',
-            encrypted: true,
-            uploadedAt: formatFileTimestamp(msg.createdAt || msg.timestamp),
-            uploadedAtRaw: msg.createdAt || msg.timestamp,
-            sessionId: msg.sessionId,
-            messageId: msg.messageId
-          }));
+          // Only include files that have a fileId (uploaded to storage)
+          const formattedFiles = fileList
+            .filter(file => file.fileId) // Only files with fileId can be downloaded/deleted
+            .map(file => ({
+              id: file.id,
+              fileId: file.fileId,
+              name: file.name,
+              size: file.size,
+              type: file.type,
+              encrypted: true,
+              uploadedAt: formatFileTimestamp(file.uploadedAt),
+              uploadedAtRaw: file.uploadedAt,
+              sessionId: file.sessionId,
+              messageId: file.id
+            }));
 
           // Sort by most recent
           formattedFiles.sort((a, b) => {
@@ -112,30 +148,79 @@ export function useFiles() {
     refetch: async () => {
       if (user?.id) {
         try {
-          const response = await api.get(`/messages/pending/${user.id}`);
+          setLoading(true);
+          setError(null);
+          
+          // Try files endpoint first
+          let response;
+          try {
+            response = await api.get('/files');
+          } catch (err) {
+            // Fall back to messages endpoint
+            if (err.response?.status === 404 || err.response?.status === 403) {
+              response = await api.get(`/messages/pending/${user.id}`);
+            } else {
+              throw err;
+            }
+          }
+          
           if (response.data.success) {
-            const messages = response.data.data.messages || [];
-            const fileMessages = messages.filter(msg => msg.type === 'FILE_META');
-            const formattedFiles = fileMessages.map(msg => ({
-              id: msg.messageId,
-              name: msg.meta?.filename || 'Unknown file',
-              size: msg.meta?.size || 0,
-            type: msg.meta?.mimetype || 'application/octet-stream',
-            encrypted: true,
-            uploadedAt: formatFileTimestamp(msg.createdAt || msg.timestamp),
-            uploadedAtRaw: msg.createdAt || msg.timestamp,
-            sessionId: msg.sessionId,
-            messageId: msg.messageId
-            }));
-            formattedFiles.sort((a, b) => {
-              const timeA = new Date(a.uploadedAtRaw).getTime();
-              const timeB = new Date(b.uploadedAtRaw).getTime();
-              return timeB - timeA;
-            });
-            setFiles(formattedFiles);
+            // Check if it's files endpoint response
+            if (response.data.data.files) {
+              const fileList = response.data.data.files || [];
+              // Only include files that have a fileId (uploaded to storage)
+              const formattedFiles = fileList
+                .filter(file => file.fileId) // Only files with fileId can be downloaded/deleted
+                .map(file => ({
+                  id: file.id,
+                  fileId: file.fileId,
+                  name: file.name,
+                  size: file.size,
+                  type: file.type,
+                  encrypted: true,
+                  uploadedAt: formatFileTimestamp(file.uploadedAt),
+                  uploadedAtRaw: file.uploadedAt,
+                  sessionId: file.sessionId,
+                  messageId: file.id
+                }));
+              
+              formattedFiles.sort((a, b) => {
+                const timeA = new Date(a.uploadedAtRaw).getTime();
+                const timeB = new Date(b.uploadedAtRaw).getTime();
+                return timeB - timeA;
+              });
+              
+              setFiles(formattedFiles);
+            } else {
+              // Messages endpoint response
+              const messages = response.data.data.messages || [];
+              const fileMessages = messages.filter(msg => msg.type === 'FILE_META');
+              const formattedFiles = fileMessages.map(msg => ({
+                id: msg.messageId,
+                name: msg.meta?.filename || 'Unknown file',
+                size: msg.meta?.size || 0,
+                type: msg.meta?.mimetype || 'application/octet-stream',
+                encrypted: true,
+                uploadedAt: formatFileTimestamp(msg.createdAt || msg.timestamp),
+                uploadedAtRaw: msg.createdAt || msg.timestamp,
+                sessionId: msg.sessionId,
+                messageId: msg.messageId
+              }));
+              
+              formattedFiles.sort((a, b) => {
+                const timeA = new Date(a.uploadedAtRaw).getTime();
+                const timeB = new Date(b.uploadedAtRaw).getTime();
+                return timeB - timeA;
+              });
+              
+              setFiles(formattedFiles);
+            }
           }
         } catch (err) {
           console.error('Failed to refetch files:', err);
+          setError(err.message);
+        } finally {
+          setLoading(false);
         }
       }
     }

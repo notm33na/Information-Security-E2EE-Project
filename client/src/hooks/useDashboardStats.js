@@ -68,7 +68,7 @@ export function useDashboardStats() {
           messages: messageCount,
           contacts: contacts,
           filesShared: filesShared,
-          activeKeys: activeKeys || 1, // At least 1 if user is logged in
+          activeKeys: activeKeys, // Show actual count
         });
       } catch (err) {
         console.error('Failed to fetch dashboard stats:', err);

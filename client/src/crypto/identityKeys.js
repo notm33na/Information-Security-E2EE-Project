@@ -12,7 +12,7 @@
  */
 
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 7; // Must match the highest version used by any module
+const DB_VERSION = 8; // Must match the highest version used by any module
 const STORE_NAME = 'identityKeys';
 
 /**
@@ -190,6 +190,9 @@ export async function storePrivateKeyEncrypted(userId, privateKey, password) {
   }
 
   try {
+    // Check if key already exists to determine if this is first-time storage
+    const keyExists = await hasIdentityKey(userId);
+    
     // Export private key to JWK format
     const jwk = await crypto.subtle.exportKey('jwk', privateKey);
 
@@ -233,7 +236,11 @@ export async function storePrivateKeyEncrypted(userId, privateKey, password) {
       request.onerror = () => reject(request.error);
     });
 
-    console.log('✓ Identity private key stored securely');
+    if (keyExists) {
+      console.log(`[Identity Keys] ✓ Identity key UPDATED in IndexedDB for user ${userId}`);
+    } else {
+      console.log(`[Identity Keys] ✓ Identity key generated for the first time and stored in IndexedDB for user ${userId}`);
+    }
   } catch (error) {
     throw new Error(`Failed to store private key: ${error.message}`);
   }
@@ -264,8 +271,13 @@ export async function loadPrivateKey(userId, password) {
     });
 
     if (!encryptedKey) {
+      console.log(`[Identity Keys] ✗ IndexedDB missing key — recovery failed for user ${userId}`);
       throw new Error('Private key not found for user');
     }
+
+    // Log key recovery with creation timestamp
+    const createdAt = encryptedKey.createdAt ? new Date(encryptedKey.createdAt).toISOString() : 'unknown';
+    console.log(`[Identity Keys] ✓ Identity key recovered from IndexedDB for user ${userId} (created: ${createdAt})`);
 
     // Convert stored arrays back to Uint8Array
     const encryptedData = new Uint8Array(encryptedKey.encryptedData);
@@ -289,6 +301,7 @@ export async function loadPrivateKey(userId, password) {
     } catch (decryptError) {
       // Decryption failed - likely wrong password
       const errorMsg = decryptError.message || decryptError.name || 'Decryption failed';
+      console.log(`[Identity Keys] ✗ Failed to decrypt identity key for user ${userId} - password may be incorrect`);
       throw new Error(`Failed to decrypt private key. The password may be incorrect. (${errorMsg})`);
     }
 
@@ -298,6 +311,7 @@ export async function loadPrivateKey(userId, password) {
       const decoder = new TextDecoder();
       jwk = JSON.parse(decoder.decode(decryptedData));
     } catch (parseError) {
+      console.log(`[Identity Keys] ✗ Failed to parse decrypted key data for user ${userId} - key may be corrupted`);
       throw new Error('Failed to parse decrypted key data. The key may be corrupted.');
     }
 
@@ -315,6 +329,7 @@ export async function loadPrivateKey(userId, password) {
       );
     } catch (importError) {
       const errorMsg = importError.message || importError.name || 'Import failed';
+      console.log(`[Identity Keys] ✗ Failed to import private key for user ${userId} - key data may be corrupted`);
       throw new Error(`Failed to import private key. The key data may be corrupted. (${errorMsg})`);
     }
 
@@ -401,8 +416,17 @@ export async function hasIdentityKey(userId) {
       request.onerror = () => reject(request.error);
     });
 
-    return !!result;
+    const exists = !!result;
+    if (exists) {
+      const createdAt = result.createdAt ? new Date(result.createdAt).toISOString() : 'unknown';
+      console.log(`[Identity Keys] ✓ Identity key exists in IndexedDB for user ${userId} (created: ${createdAt})`);
+    } else {
+      console.log(`[Identity Keys] ✗ No identity key found in IndexedDB for user ${userId}`);
+    }
+    
+    return exists;
   } catch (error) {
+    console.log(`[Identity Keys] ✗ Error checking identity key existence for user ${userId}:`, error.message);
     return false;
   }
 }

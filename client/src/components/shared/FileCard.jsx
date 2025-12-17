@@ -1,4 +1,4 @@
-import { File, Download, Lock, MoreVertical, Image, FileText, Archive, Film } from "lucide-react";
+import { File, Download, Lock, Trash2, Image, FileText, Archive, Film } from "lucide-react";
 import { Button } from "../ui/button";
 import { cn } from "../../lib/utils.js";
 
@@ -18,6 +18,30 @@ const fileColors = {
   other: "bg-muted text-muted-foreground",
 };
 
+/**
+ * Maps MIME type to file category
+ */
+function getFileCategory(mimeType) {
+  if (!mimeType) return 'other';
+  
+  const type = mimeType.toLowerCase();
+  
+  if (type.startsWith('image/')) return 'image';
+  if (type.startsWith('video/')) return 'video';
+  if (type.startsWith('audio/')) return 'other';
+  if (type.includes('pdf') || type.includes('document') || type.includes('text') || 
+      type.includes('word') || type.includes('excel') || type.includes('powerpoint') ||
+      type.includes('spreadsheet') || type.includes('presentation')) {
+    return 'document';
+  }
+  if (type.includes('zip') || type.includes('rar') || type.includes('tar') || 
+      type.includes('gzip') || type.includes('7z') || type.includes('archive')) {
+    return 'archive';
+  }
+  
+  return 'other';
+}
+
 export function FileCard({
   name,
   size,
@@ -25,10 +49,12 @@ export function FileCard({
   uploadedAt,
   isEncrypted = true,
   onDownload,
+  onDelete,
   className,
   style,
 }) {
-  const Icon = fileIcons[type];
+  const fileCategory = getFileCategory(type);
+  const Icon = fileIcons[fileCategory] || File;
 
   return (
     <div
@@ -39,7 +65,7 @@ export function FileCard({
       style={style}
     >
       <div className="flex items-start gap-4">
-        <div className={cn("w-12 h-12 rounded-lg flex items-center justify-center", fileColors[type])}>
+        <div className={cn("w-12 h-12 rounded-lg flex items-center justify-center", fileColors[fileCategory] || fileColors.other)}>
           <Icon className="w-6 h-6" />
         </div>
 
@@ -55,13 +81,29 @@ export function FileCard({
           </div>
         </div>
 
-        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <Button variant="ghost" size="icon-sm" onClick={onDownload}>
-            <Download className="w-4 h-4" />
-          </Button>
-          <Button variant="ghost" size="icon-sm">
-            <MoreVertical className="w-4 h-4" />
-          </Button>
+        <div className="flex items-center gap-1">
+          {onDownload && (
+            <Button 
+              variant="ghost" 
+              size="icon-sm" 
+              onClick={onDownload}
+              title="Download file"
+              className="opacity-70 hover:opacity-100"
+            >
+              <Download className="w-4 h-4" />
+            </Button>
+          )}
+          {onDelete && (
+            <Button 
+              variant="ghost" 
+              size="icon-sm" 
+              onClick={onDelete}
+              title="Delete file"
+              className="opacity-70 hover:opacity-100 text-destructive hover:text-destructive"
+            >
+              <Trash2 className="w-4 h-4" />
+            </Button>
+          )}
         </div>
       </div>
     </div>

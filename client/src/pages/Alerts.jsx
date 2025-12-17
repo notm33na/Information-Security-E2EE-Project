@@ -1,15 +1,27 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { Header } from "../components/layout/Header";
 import { SecurityAlert } from "../components/shared/SecurityAlert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Skeleton } from "../components/ui/skeleton";
 import { useSecurityAlerts } from "../hooks/useSecurityAlerts";
+import { useReadAlerts } from "../hooks/useReadAlerts";
 import { formatChatTimestamp } from "../utils/formatTime";
 
 export default function Alerts() {
   const [filter, setFilter] = useState("all");
   const { alerts, loading, error, refetch } = useSecurityAlerts();
+  const { markAllAsRead } = useReadAlerts();
+
+  // Mark all alerts as read when the page is opened
+  useEffect(() => {
+    if (!loading && alerts.length > 0) {
+      const alertIds = alerts.map(a => a.id).filter(Boolean);
+      if (alertIds.length > 0) {
+        markAllAsRead(alertIds);
+      }
+    }
+  }, [loading, alerts, markAllAsRead]);
 
   const filteredAlerts = useMemo(() => {
     return alerts.filter((alert) => {

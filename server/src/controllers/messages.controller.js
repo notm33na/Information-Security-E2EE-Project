@@ -2,6 +2,7 @@ import { MessageMeta, verifyMetadataHash } from '../models/MessageMeta.js';
 import { logMessageMetadataAccess, logMessageForwarding, logFileChunkForwarding } from '../utils/messageLogging.js';
 import { validateTimestamp, generateMessageId, hashNonceBase64, isNonceHashUsed } from '../utils/replayProtection.js';
 import { logReplayAttempt } from '../utils/replayProtection.js';
+import { logFailedDecryption } from '../utils/attackLogging.js';
 import { requireSenderAuthorization } from '../middlewares/authorization.middleware.js';
 
 /**
@@ -25,6 +26,39 @@ export async function relayMessage(req, res, next) {
         success: false,
         error: 'Missing required fields in envelope'
       });
+    }
+
+    // SECURITY: Ensure file messages are encrypted before sharing
+    // Only encrypted files can be shared - validate encryption fields for FILE_META and FILE_CHUNK
+    if (envelope.type === 'FILE_META' || envelope.type === 'FILE_CHUNK') {
+      if (!envelope.ciphertext || !envelope.iv || !envelope.authTag) {
+        return res.status(400).json({
+          success: false,
+          error: 'Only encrypted files can be shared. File messages must include ciphertext, iv, and authTag.'
+        });
+      }
+
+      // Validate encryption fields are non-empty strings (base64 encoded)
+      if (typeof envelope.ciphertext !== 'string' || envelope.ciphertext.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid encryption: ciphertext must be a non-empty base64 string'
+        });
+      }
+
+      if (typeof envelope.iv !== 'string' || envelope.iv.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid encryption: iv must be a non-empty base64 string'
+        });
+      }
+
+      if (typeof envelope.authTag !== 'string' || envelope.authTag.trim().length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid encryption: authTag must be a non-empty base64 string'
+        });
+      }
     }
 
     // Validate timestamp
@@ -86,23 +120,31 @@ export async function relayMessage(req, res, next) {
     });
 
     // Forward to recipient via WebSocket if online
+    // Find ALL sockets for the recipient (user may have multiple: globalSocket, chat socket, etc.)
     const io = req.app.get('io');
     if (io) {
       const sockets = await io.fetchSockets();
-      const recipientSocket = sockets.find(s => s.data.user?.id === envelope.receiver);
+      const recipientSockets = sockets.filter(s => s.data.user?.id === envelope.receiver);
 
-      if (recipientSocket) {
-        if (envelope.type === 'FILE_CHUNK') {
+      if (recipientSockets.length > 0) {
+        // Forward the message to all recipient sockets
+        console.log(`[MSG] Forwarding message from ${req.user.id} to ${envelope.receiver} (session ${envelope.sessionId}, seq ${envelope.seq}) - found ${recipientSockets.length} socket(s)`);
+        recipientSockets.forEach(recipientSocket => {
           recipientSocket.emit('msg:receive', envelope);
+        });
+
+        if (envelope.type === 'FILE_CHUNK') {
           logFileChunkForwarding(req.user.id, envelope.receiver, envelope.sessionId, envelope.meta?.chunkIndex);
         } else {
-          recipientSocket.emit('msg:receive', envelope);
           logMessageForwarding(req.user.id, envelope.receiver, envelope.sessionId, envelope.type);
         }
 
         messageMeta.delivered = true;
         messageMeta.deliveredAt = new Date();
         await messageMeta.save();
+        console.log(`[MSG] ✓ Message delivered to ${envelope.receiver} via ${recipientSockets.length} socket(s)`);
+      } else {
+        console.warn(`[MSG] Message recipient ${envelope.receiver} not found online (session ${envelope.sessionId}, seq ${envelope.seq})`);
       }
     }
 
@@ -191,6 +233,43 @@ export async function getPendingMessages(req, res, next) {
       data: {
         messages: pendingMessages.map(msg => minimizeMessageMeta(msg))
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Report decryption failure (client-side)
+ * POST /api/messages/decryption-failure
+ */
+export async function reportDecryptionFailure(req, res, next) {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: 'Authentication required'
+      });
+    }
+
+    const { sessionId, seq, reason } = req.body;
+
+    if (!sessionId || seq === undefined || !reason) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields: sessionId, seq, and reason are required'
+      });
+    }
+
+    // Get client IP
+    const clientIP = req.ip || req.socket.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
+
+    // Log the decryption failure
+    logFailedDecryption(sessionId, req.user.id, seq, reason, clientIP);
+
+    res.json({
+      success: true,
+      message: 'Decryption failure logged'
     });
   } catch (error) {
     next(error);

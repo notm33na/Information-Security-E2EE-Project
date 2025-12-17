@@ -5,17 +5,21 @@
  */
 
 /**
- * Generates a cryptographically secure session ID
+ * Generates a deterministic session ID for a user pair
+ * IMPORTANT: This must match the backend logic exactly
+ * Sorts user IDs to ensure same session ID regardless of order
  * @param {string} userId - User ID
  * @param {string} peerId - Peer user ID
- * @returns {Promise<string>} Secure session ID
+ * @returns {Promise<string>} Deterministic session ID
  */
 export async function generateSecureSessionId(userId, peerId) {
-  // Create deterministic but secure session ID
-  const encoder = new TextEncoder();
-  const data = encoder.encode(`${userId}:${peerId}:${Date.now()}`);
+  // Sort user IDs to ensure same session ID regardless of order
+  const sortedIds = [userId.toString(), peerId.toString()].sort();
+  const sessionData = `${sortedIds[0]}:${sortedIds[1]}:session`;
   
-  // Hash to create unpredictable session ID
+  // Hash to create session ID (must match backend)
+  const encoder = new TextEncoder();
+  const data = encoder.encode(sessionData);
   const hash = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hash));
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').substring(0, 32);

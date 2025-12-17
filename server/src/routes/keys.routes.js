@@ -5,10 +5,10 @@ import { verifyTokenMiddleware, requireAuth } from '../middlewares/auth.middlewa
 
 const router = express.Router();
 
-// Rate limiting for public key endpoints
+// Rate limiting for public key endpoints - increased for session establishment retries
 const keyLimiter = rateLimit({
   windowMs: 1 * 60 * 1000, // 1 minute
-  max: 30, // 30 requests per minute per IP
+  max: 100, // 100 requests per minute per IP (increased for retries during session establishment)
   message: {
     success: false,
     error: 'Too many requests',

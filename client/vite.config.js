@@ -22,6 +22,12 @@ if (localIP) {
   hostnames.push(localIP);
 }
 
+// Get backend URL from environment variable or default to localhost
+// Set VITE_BACKEND_URL in .env file to point to shared backend server
+// Example: VITE_BACKEND_URL=https://192.168.1.100:8443
+const backendURL = process.env.VITE_BACKEND_URL || 'https://localhost:8443';
+const backendHost = new URL(backendURL).hostname;
+
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [
@@ -41,19 +47,20 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'https://localhost:8443',
+        target: backendURL,
         changeOrigin: true,
         secure: false, // Allow self-signed certificates
         rewrite: (path) => path,
         configure: (proxy, options) => {
           proxy.on('error', (err, req, res) => {
             console.warn('Proxy error:', err.message);
-            console.warn('Make sure the backend server is running on https://localhost:8443');
+            console.warn(`Make sure the backend server is running on ${backendURL}`);
+            console.warn('You can configure the backend URL by setting VITE_BACKEND_URL in .env file');
           });
         }
       },
       '/socket.io': {
-        target: 'https://localhost:8443',
+        target: backendURL,
         changeOrigin: true,
         secure: false, // Allow self-signed certificates
         ws: true, // Enable WebSocket proxying

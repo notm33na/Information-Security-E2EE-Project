@@ -7,6 +7,8 @@ import { logInvalidKEPMessage, logReplayAttempt, validateTimestamp, generateMess
 import { logMessageForwarding, logFileChunkForwarding, logReplayDetected } from '../utils/messageLogging.js';
 import { securityLogger, authLogger } from '../utils/logger.js';
 import { logKeyExchangeAttempt } from '../utils/attackLogging.js';
+import { captureMessage } from '../services/replayAttackSimulator.js';
+import { interceptKEPInit, interceptKEPResponse } from '../services/mitmAttackSimulator.js';
 
 /**
  * Initializes and configures Socket.IO server with JWT authentication
@@ -29,8 +31,8 @@ export function initializeWebSocket(httpsServer) {
     transports: ['websocket', 'polling'] // Allow both transports
   });
 
-  // Connection limit tracking
-  const MAX_CONNECTIONS_PER_IP = parseInt(process.env.MAX_WS_CONNECTIONS_PER_IP || '10', 10);
+  // Connection limit tracking - increased to handle multiple components (Chat, Settings, E2EE, Global, etc.)
+  const MAX_CONNECTIONS_PER_IP = parseInt(process.env.MAX_WS_CONNECTIONS_PER_IP || '20', 10);
   const connectionCounts = new Map(); // IP -> count
 
   // Cleanup connection counts periodically
@@ -331,6 +333,14 @@ export function initializeWebSocket(httpsServer) {
 
         await kepMessage.save();
 
+        // Intercept KEP_INIT for MITM simulation (if enabled)
+        try {
+          await interceptKEPInit(sessionId, data, socket.data.user.id);
+        } catch (error) {
+          // Don't fail KEP processing if interception fails
+          console.warn('[MITM_ATTACK] Failed to intercept KEP_INIT for simulation:', error.message);
+        }
+
         // Log KEP_INIT received
         logKeyExchangeAttempt(sessionId, socket.data.user.id, to, 'KEP_INIT', true);
         securityLogger.info({
@@ -344,15 +354,23 @@ export function initializeWebSocket(httpsServer) {
 
         // Forward full KEP_INIT message to recipient if online
         const sockets = await io.fetchSockets();
-        const recipientSocket = sockets.find(s => s.data.user?.id === to);
+        const recipientSockets = sockets.filter(s => s.data.user?.id === to);
 
-        if (recipientSocket) {
-          // Forward the complete KEP_INIT message
-          recipientSocket.emit('kep:init', data);
+        if (recipientSockets.length > 0) {
+          // Forward the complete KEP_INIT message to all recipient sockets
+          // (user may have multiple sockets: globalSocket, chat socket, etc.)
+          console.log(`[KEP] Forwarding KEP_INIT from ${socket.data.user.id} to ${to} (session ${sessionId}) - found ${recipientSockets.length} socket(s)`);
+          recipientSockets.forEach((recipientSocket, index) => {
+            console.log(`[KEP] Emitting KEP_INIT to recipient socket ${index + 1}/${recipientSockets.length} (socket.id: ${recipientSocket.id})`);
+            recipientSocket.emit('kep:init', data);
+          });
 
           kepMessage.delivered = true;
           kepMessage.deliveredAt = new Date();
           await kepMessage.save();
+          console.log(`[KEP] ✓ KEP_INIT delivered to ${to} via ${recipientSockets.length} socket(s)`);
+        } else {
+          console.warn(`[KEP] KEP_INIT recipient ${to} not found online (checked ${sockets.length} total sockets)`);
         }
 
         socket.emit('kep:sent', {
@@ -372,7 +390,16 @@ export function initializeWebSocket(httpsServer) {
     // KEP:RESPONSE event handler - requires authentication (allow stale tokens for KEP)
     socket.on('kep:response', requireAuth(socket, async (data) => {
       // Note: Third parameter (true) allows stale tokens for KEP operations
-      console.log(`[KEP] Received KEP_RESPONSE from ${socket.data.user.id} for session ${data.sessionId}`);
+      console.log(`[KEP] Received KEP_RESPONSE from ${socket.data.user.id} for session ${data?.sessionId}`);
+      console.log(`[KEP] KEP_RESPONSE details:`, {
+        from: data?.from,
+        to: data?.to,
+        sessionId: data?.sessionId,
+        type: data?.type,
+        hasEphPub: !!data?.ephPub,
+        hasSignature: !!data?.signature,
+        hasKeyConfirmation: !!data?.keyConfirmation
+      });
 
       // Rate limiting check for KEP
       const rateLimit = messageRateLimits.get(socket.id);
@@ -453,6 +480,14 @@ export function initializeWebSocket(httpsServer) {
 
         await kepMessage.save();
 
+        // Intercept KEP_RESPONSE for MITM simulation (if enabled)
+        try {
+          await interceptKEPResponse(sessionId, data, socket.data.user.id);
+        } catch (error) {
+          // Don't fail KEP processing if interception fails
+          console.warn('[MITM_ATTACK] Failed to intercept KEP_RESPONSE for simulation:', error.message);
+        }
+
         // Log KEP_RESPONSE received
         logKeyExchangeAttempt(sessionId, socket.data.user.id, to, 'KEP_RESPONSE', true);
         securityLogger.info({
@@ -466,19 +501,23 @@ export function initializeWebSocket(httpsServer) {
 
         // Forward full KEP_RESPONSE message to recipient if online
         const sockets = await io.fetchSockets();
-        const recipientSocket = sockets.find(s => s.data.user?.id === to);
+        const recipientSockets = sockets.filter(s => s.data.user?.id === to);
 
-        if (recipientSocket) {
-          // Forward the complete KEP_RESPONSE message
-          console.log(`[KEP] Forwarding KEP_RESPONSE from ${socket.data.user.id} to ${to} (session ${data.sessionId})`);
-          recipientSocket.emit('kep:response', data);
+        if (recipientSockets.length > 0) {
+          // Forward the complete KEP_RESPONSE message to all recipient sockets
+          // (user may have multiple sockets: globalSocket, chat socket, etc.)
+          console.log(`[KEP] Forwarding KEP_RESPONSE from ${socket.data.user.id} to ${to} (session ${data.sessionId}) - found ${recipientSockets.length} socket(s)`);
+          recipientSockets.forEach((recipientSocket, index) => {
+            console.log(`[KEP] Emitting KEP_RESPONSE to recipient socket ${index + 1}/${recipientSockets.length} (socket.id: ${recipientSocket.id})`);
+            recipientSocket.emit('kep:response', data);
+          });
 
           kepMessage.delivered = true;
           kepMessage.deliveredAt = new Date();
           await kepMessage.save();
-          console.log(`[KEP] ✓ KEP_RESPONSE delivered to ${to}`);
+          console.log(`[KEP] ✓ KEP_RESPONSE delivered to ${to} via ${recipientSockets.length} socket(s)`);
         } else {
-          console.warn(`[KEP] KEP_RESPONSE recipient ${to} not found online`);
+          console.warn(`[KEP] KEP_RESPONSE recipient ${to} not found online (checked ${sockets.length} total sockets)`);
         }
 
         socket.emit('kep:sent', {
@@ -576,6 +615,43 @@ export function initializeWebSocket(httpsServer) {
           return;
         }
 
+        // SECURITY: Ensure file messages are encrypted before sharing
+        // Only encrypted files can be shared - validate encryption fields for FILE_META and FILE_CHUNK
+        if (type === 'FILE_META' || type === 'FILE_CHUNK') {
+          if (!envelope.ciphertext || !envelope.iv || !envelope.authTag) {
+            socket.emit('error', {
+              message: 'Only encrypted files can be shared. File messages must include ciphertext, iv, and authTag.',
+              timestamp: new Date().toISOString()
+            });
+            return;
+          }
+
+          // Validate encryption fields are non-empty strings (base64 encoded)
+          if (typeof envelope.ciphertext !== 'string' || envelope.ciphertext.trim().length === 0) {
+            socket.emit('error', {
+              message: 'Invalid encryption: ciphertext must be a non-empty base64 string',
+              timestamp: new Date().toISOString()
+            });
+            return;
+          }
+
+          if (typeof envelope.iv !== 'string' || envelope.iv.trim().length === 0) {
+            socket.emit('error', {
+              message: 'Invalid encryption: iv must be a non-empty base64 string',
+              timestamp: new Date().toISOString()
+            });
+            return;
+          }
+
+          if (typeof envelope.authTag !== 'string' || envelope.authTag.trim().length === 0) {
+            socket.emit('error', {
+              message: 'Invalid encryption: authTag must be a non-empty base64 string',
+              timestamp: new Date().toISOString()
+            });
+            return;
+          }
+        }
+
         // Generate message ID using the message's timestamp
         const messageId = generateMessageId(sessionId, seq, timestamp);
 
@@ -595,6 +671,14 @@ export function initializeWebSocket(httpsServer) {
 
         await messageMeta.save();
 
+        // Capture message for replay attack simulation (if enabled)
+        try {
+          await captureMessage(envelope, socket.data.user.id);
+        } catch (error) {
+          // Don't fail message processing if capture fails
+          console.warn('[REPLAY_ATTACK] Failed to capture message for simulation:', error.message);
+        }
+
         // Log message accepted
         securityLogger.info({
           event: 'message_accepted',
@@ -608,11 +692,16 @@ export function initializeWebSocket(httpsServer) {
         });
 
         // Forward to recipient if online
+        // Find ALL sockets for the recipient (user may have multiple: globalSocket, chat socket, etc.)
         const sockets = await io.fetchSockets();
-        const recipientSocket = sockets.find(s => s.data.user?.id === receiver);
+        const recipientSockets = sockets.filter(s => s.data.user?.id === receiver);
 
-        if (recipientSocket) {
-          recipientSocket.emit('msg:receive', envelope);
+        if (recipientSockets.length > 0) {
+          // Forward the message to all recipient sockets
+          console.log(`[MSG] Forwarding message from ${socket.data.user.id} to ${receiver} (session ${sessionId}, seq ${seq}) - found ${recipientSockets.length} socket(s)`);
+          recipientSockets.forEach(recipientSocket => {
+            recipientSocket.emit('msg:receive', envelope);
+          });
 
           if (type === 'FILE_CHUNK') {
             logFileChunkForwarding(socket.data.user.id, receiver, sessionId, envelope.meta?.chunkIndex);
@@ -623,6 +712,9 @@ export function initializeWebSocket(httpsServer) {
           messageMeta.delivered = true;
           messageMeta.deliveredAt = new Date();
           await messageMeta.save();
+          console.log(`[MSG] ✓ Message delivered to ${receiver} via ${recipientSockets.length} socket(s)`);
+        } else {
+          console.warn(`[MSG] Message recipient ${receiver} not found online (session ${sessionId}, seq ${seq})`);
         }
 
         socket.emit('msg:sent', {

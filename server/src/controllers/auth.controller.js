@@ -114,7 +114,7 @@ export async function login(req, res, next) {
     // Get user with password hash
     const user = await userService.getUserByEmail(email, true);
     if (!user) {
-      logAuthenticationAttempt(null, false, 'User not found');
+      logAuthenticationAttempt(null, false, 'User not found', clientIP);
       recordAuthFailure(null, clientIP, 'User not found');
       return res.status(401).json({
         success: false,
@@ -125,7 +125,7 @@ export async function login(req, res, next) {
 
     // Check if account is active
     if (!user.isActive) {
-      logAuthenticationAttempt(user._id.toString(), false, 'Account deactivated');
+      logAuthenticationAttempt(user._id.toString(), false, 'Account deactivated', clientIP);
       recordAuthFailure(user._id.toString(), clientIP, 'Account deactivated');
       return res.status(403).json({
         success: false,
@@ -139,7 +139,7 @@ export async function login(req, res, next) {
     const lockoutStatus = isAccountLocked(user._id.toString());
     
     if (lockoutStatus.locked) {
-      logAuthenticationAttempt(user._id.toString(), false, 'Account locked due to too many failed attempts');
+      logAuthenticationAttempt(user._id.toString(), false, 'Account locked due to too many failed attempts', clientIP);
       recordAuthFailure(user._id.toString(), clientIP, 'Account locked');
       return res.status(423).json({
         success: false,
@@ -154,7 +154,7 @@ export async function login(req, res, next) {
     if (!isValidPassword) {
       // Record failed attempt
       const attemptStatus = recordFailedAttempt(user._id.toString());
-      logAuthenticationAttempt(user._id.toString(), false, 'Invalid password');
+      logAuthenticationAttempt(user._id.toString(), false, 'Invalid password', clientIP);
       recordAuthFailure(user._id.toString(), clientIP, 'Invalid password');
       
       if (attemptStatus.locked) {
@@ -177,7 +177,7 @@ export async function login(req, res, next) {
     clearFailedAttempts(user._id.toString());
 
     // Log successful authentication
-    logAuthenticationAttempt(user._id.toString(), true, 'Login successful');
+    logAuthenticationAttempt(user._id.toString(), true, 'Login successful', clientIP);
     authLogger.info({
       event: 'login_success',
       userId: user._id.toString(),

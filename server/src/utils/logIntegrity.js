@@ -28,7 +28,9 @@ if (!HMAC_KEY) {
       '⚠️  WARNING: LOG_HMAC_KEY not set. Using default key. ' +
       'This is insecure and should only be used in development/test environments.'
     );
-    // Use a default key only in non-production
+    // DEVELOPMENT/TEST ONLY: This default key will NEVER be used in production.
+    // Production environments will throw an error above if LOG_HMAC_KEY is not set.
+    // This fallback is only for convenience during development and testing.
     HMAC_KEY = 'default-log-integrity-key-change-in-production';
   }
 }

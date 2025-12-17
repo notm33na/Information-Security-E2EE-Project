@@ -1,14 +1,15 @@
 import axios from 'axios';
 import { getAccessToken, notifyTokenUpdate } from '../utils/tokenStore.js';
+import { getBackendURL } from '../config/backend.js';
 
 /**
  * Axios instance configured for the secure backend API
  * Uses Vite proxy in development to handle self-signed certificates
- * In production, use the full HTTPS URL
+ * In production, use the configured backend URL
  */
 const baseURL = import.meta.env.DEV 
   ? '/api'  // Use Vite proxy in development
-  : 'https://localhost:8443/api';  // Direct connection in production
+  : `${getBackendURL()}/api`;  // Direct connection in production
 
 const api = axios.create({
   baseURL,
@@ -42,6 +43,8 @@ api.interceptors.request.use(
     const token = getAccessToken();
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
+    } else {
+      console.warn('[API] No access token available for request:', config.url);
     }
     return config;
   },
@@ -106,13 +109,20 @@ api.interceptors.response.use(
         // If refresh failed with 401, the refresh token is also expired
         if (refreshError.response?.status === 401) {
           console.warn('Token refresh failed: Refresh token expired. User needs to log in again.');
+          // Return the original error with a helpful message
+          const originalError = new Error(error.response?.data?.message || 'Your session has expired. Please log in again.');
+          originalError.response = error.response;
+          originalError.config = error.config;
+          return Promise.reject(originalError);
         } else if (refreshError.code === 'ECONNREFUSED' || refreshError.message?.includes('Network Error')) {
           console.error('Token refresh failed: Cannot connect to server.');
+          // Return the original error
+          return Promise.reject(error);
         } else {
           console.error('Token refresh failed:', refreshError.message);
+          // Return the original error so the component can see the actual API error
+          return Promise.reject(error);
         }
-        
-        return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;
       }
@@ -127,7 +137,7 @@ api.interceptors.response.use(
       // Check if it's a connection refused error
       if (error.code === 'ECONNREFUSED' || error.message.includes('Network Error')) {
         console.error('Network Error: Backend server is not running or not accessible.');
-        console.error('Please ensure the backend server is running on https://localhost:8443');
+        console.error(`Please ensure the backend server is running on ${getBackendURL()}`);
         // Don't spam console with network errors - only log once
         if (!window.__backendConnectionErrorLogged) {
           console.error('To start the backend server, run: cd server && npm run dev');

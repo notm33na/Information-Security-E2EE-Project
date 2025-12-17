@@ -5,6 +5,7 @@ import { Input } from "../ui/input";
 import { cn } from "../../lib/utils.js";
 import { useTheme } from "../../context/ThemeContext";
 import { useSecurityAlerts } from "../../hooks/useSecurityAlerts";
+import { useReadAlerts } from "../../hooks/useReadAlerts";
 
 export function Header({
   title,
@@ -16,10 +17,11 @@ export function Header({
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { alerts = [] } = useSecurityAlerts();
+  const { isRead } = useReadAlerts();
   
   // Count unread/critical alerts
-  const alertCount = alerts.filter(a => 
-    a.severity === 'critical' || a.severity === 'high'
+  const unreadAlertCount = alerts.filter(a => 
+    (a.severity === 'critical' || a.severity === 'high') && !isRead(a.id)
   ).length;
 
   return (
@@ -59,9 +61,9 @@ export function Header({
           title="Security Alerts"
         >
           <Bell className="w-5 h-5" />
-          {alertCount > 0 && (
+          {unreadAlertCount > 0 && (
             <span className="absolute top-1.5 right-1.5 min-w-[18px] h-[18px] flex items-center justify-center px-1 bg-destructive text-destructive-foreground text-[10px] font-bold rounded-full">
-              {alertCount > 9 ? '9+' : alertCount}
+              {unreadAlertCount > 9 ? '9+' : unreadAlertCount}
             </span>
           )}
         </Button>

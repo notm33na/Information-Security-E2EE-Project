@@ -1,6 +1,6 @@
 import express from 'express';
 import rateLimit from 'express-rate-limit';
-import { relayMessage, getPendingMessages } from '../controllers/messages.controller.js';
+import { relayMessage, getPendingMessages, reportDecryptionFailure } from '../controllers/messages.controller.js';
 import { verifyTokenMiddleware, requireAuth } from '../middlewares/auth.middleware.js';
 import { requireSenderAuthorization, requireOwnResource } from '../middlewares/authorization.middleware.js';
 
@@ -48,11 +48,18 @@ router.post(
 // Get pending messages (requires auth and own resource access)
 router.get(
   '/pending/:userId',
-  pendingMessagesLimiter,
   verifyTokenMiddleware,
   requireAuth,
   requireOwnResource,
   getPendingMessages
+);
+
+// Report decryption failure (client-side)
+router.post(
+  '/decryption-failure',
+  verifyTokenMiddleware,
+  requireAuth,
+  reportDecryptionFailure
 );
 
 export default router;

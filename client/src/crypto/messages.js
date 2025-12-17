@@ -169,17 +169,63 @@ export async function validateKEPInit(message, identityPublicKey, maxAge = 12000
     // Verify signature
     const { verifyEphemeralKeySignature, base64ToArrayBuffer } = await import('./signatures.js');
     const signature = base64ToArrayBuffer(message.signature);
+    
+    console.log(`[KEP Validation] Verifying signature for KEP_INIT from ${message.from}...`);
+    console.log(`[KEP Validation] Ephemeral key JWK structure:`, {
+      hasKty: !!message.ephPub?.kty,
+      hasCrv: !!message.ephPub?.crv,
+      hasX: !!message.ephPub?.x,
+      hasY: !!message.ephPub?.y,
+      keys: message.ephPub ? Object.keys(message.ephPub) : []
+    });
+    
+    // Log the actual JWK values (first 50 chars of x and y for debugging)
+    if (message.ephPub) {
+      console.log(`[KEP Validation] Ephemeral key preview:`, {
+        kty: message.ephPub.kty,
+        crv: message.ephPub.crv,
+        x: message.ephPub.x ? message.ephPub.x.substring(0, 50) + '...' : 'missing',
+        y: message.ephPub.y ? message.ephPub.y.substring(0, 50) + '...' : 'missing'
+      });
+    }
+    
     const isValid = await verifyEphemeralKeySignature(identityPublicKey, signature, message.ephPub);
 
     if (!isValid) {
       const error = 'Invalid signature';
+      // Use console.error with prominent styling to ensure visibility
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error('🚨 SIGNATURE VERIFICATION FAILED 🚨');
+      console.error('═══════════════════════════════════════════════════════════');
+      console.error(`[KEP Validation] ✗ Signature verification failed for KEP_INIT from ${message.from}`);
+      console.error(`[KEP Validation] Session ID: ${message.sessionId}`);
+      console.error(`[KEP Validation] This could indicate:`, {
+        possibleCauses: [
+          'Peer\'s public identity key doesn\'t match their private key',
+          'Ephemeral key JWK format mismatch',
+          'Key corruption or tampering',
+          'Peer regenerated their keys but server has old public key'
+        ],
+        peerId: message.from,
+        sessionId: message.sessionId,
+        recommendation: 'Have the peer regenerate their identity key pair and upload the new public key'
+      });
+      console.error('═══════════════════════════════════════════════════════════');
+      
       if (userId && message.sessionId) {
-        const { logInvalidSignature, logKEPError } = await import('../utils/clientLogger.js');
-        await logInvalidSignature(message.sessionId, error, userId, 'KEP_INIT');
-        await logKEPError(message.sessionId, error, userId, 'KEP_INIT');
+        try {
+          const { logInvalidSignature, logKEPError } = await import('../utils/clientLogger.js');
+          await logInvalidSignature(message.sessionId, error, userId, 'KEP_INIT');
+          await logKEPError(message.sessionId, error, userId, 'KEP_INIT');
+        } catch (logError) {
+          console.error('[KEP Validation] Failed to log to IndexedDB:', logError);
+        }
       }
       return { valid: false, error };
     }
+    
+    console.log(`[KEP Validation] ✓ Signature verified successfully`);
+    console.log('[KEP] ✓ Signature verified successfully');
 
     return { valid: true };
   } catch (error) {
@@ -303,6 +349,8 @@ export async function validateKEPResponse(message, identityPublicKey, rootKey, u
       return { valid: false, error };
     }
 
+    console.log('[KEP] ✓ Signature verified successfully');
+
     // Verify key confirmation
     const encoder = new TextEncoder();
     const confirmData = encoder.encode(`CONFIRM:${userId}`);
@@ -324,6 +372,8 @@ export async function validateKEPResponse(message, identityPublicKey, rootKey, u
       }
       return { valid: false, error };
     }
+
+    console.log('[KEP] ✓ Key confirmation received and verified');
 
     return { valid: true };
   } catch (error) {

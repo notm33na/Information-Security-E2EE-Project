@@ -11,7 +11,7 @@
  */
 
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 7; // Must match the highest version used by any module
+const DB_VERSION = 8; // Must match the highest version used by any module
 const CLIENT_LOGS_STORE = 'clientLogs';
 
 /**
@@ -408,12 +408,28 @@ export async function logInvalidSignature(sessionId, reason, userId = null, mess
 }
 
 export async function logDecryptionError(sessionId, seq, reason, userId = null) {
-  return logSecurityEvent('decryption_error', {
+  // Store locally
+  const localResult = await logSecurityEvent('decryption_error', {
     userId,
     sessionId,
     seq,
     reason
   });
+
+  // Also report to server for centralized logging
+  try {
+    const api = (await import('../services/api.js')).default;
+    await api.post('/messages/decryption-failure', {
+      sessionId,
+      seq,
+      reason
+    });
+  } catch (error) {
+    // Don't fail if server reporting fails - local log is sufficient
+    console.warn('[ClientLogger] Failed to report decryption error to server:', error.message);
+  }
+
+  return localResult;
 }
 
 export async function logKEPError(sessionId, reason, userId = null, messageType = null) {

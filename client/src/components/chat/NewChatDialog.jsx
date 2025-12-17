@@ -122,39 +122,40 @@ export function NewChatDialog({ open, onOpenChange }) {
 
   const handleStartChat = async (peerId, peerEmail) => {
     try {
-      // Check if session already exists
-      const { getUserSessions } = await import('../../crypto/sessionManager');
-      const { generateSecureSessionId } = await import('../../crypto/sessionIdSecurity');
+      // Call backend API to get or create session
+      // This ensures we always get the same session ID for the same user pair
+      const api = (await import('../../services/api')).default;
       
-      let existingSessions = [];
-      try {
-        existingSessions = await getUserSessions(user.id);
-      } catch (error) {
-        console.warn('Failed to get existing sessions, proceeding with new session:', error);
-        // Continue with creating a new session
-      }
+      console.log(`[NewChatDialog] Getting or creating session for users ${user.id} ↔ ${peerId}`);
       
-      const existingSession = existingSessions.find(s => s.peerId === peerId);
+      const response = await api.post('/sessions', {
+        userId1: user.id,
+        userId2: peerId
+      });
       
-      if (existingSession) {
-        // Navigate to existing chat
-        navigate(`/chat/${existingSession.sessionId}`, {
+      if (response.data.success) {
+        const { session, isNew } = response.data.data;
+        
+        if (isNew) {
+          console.log(`[NewChatDialog] ✓ NEW session created: ${session.sessionId}`);
+        } else {
+          console.log(`[NewChatDialog] ✓ EXISTING session found: ${session.sessionId} (created: ${session.createdAt})`);
+        }
+        
+        // Navigate to chat with the session ID from backend
+        navigate(`/chat/${session.sessionId}`, {
           state: { peerId, peerEmail }
         });
       } else {
-        // Create new session ID and navigate
-        const newSessionId = await generateSecureSessionId(user.id, peerId);
-        navigate(`/chat/${newSessionId}`, {
-          state: { peerId, peerEmail }
-        });
+        throw new Error(response.data.error || 'Failed to get or create session');
       }
       
       onOpenChange(false);
     } catch (error) {
-      console.error('Error starting chat:', error);
+      console.error('[NewChatDialog] Error starting chat:', error);
       toast({
         title: "Error",
-        description: "Failed to start conversation. Please try again.",
+        description: error.response?.data?.message || error.message || "Failed to start conversation. Please try again.",
         variant: "destructive",
       });
     }

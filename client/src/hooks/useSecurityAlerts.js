@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { getUserSessions } from '../crypto/sessionManager';
+import { getUserSessions, initializeSessionEncryption } from '../crypto/sessionManager';
 import { getLogs } from '../utils/clientLogger';
 
 /**
@@ -8,7 +8,7 @@ import { getLogs } from '../utils/clientLogger';
  * Includes replay attempts, MITM attacks, signature failures, and other security events
  */
 export function useSecurityAlerts() {
-  const { user } = useAuth();
+  const { user, getCachedPassword } = useAuth();
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -148,7 +148,35 @@ export function useSecurityAlerts() {
         });
 
         // Get all sessions to check for stale sessions
-        const sessions = await getUserSessions(user.id);
+        // Use cached password if available to decrypt sessions
+        const cachedPassword = getCachedPassword ? getCachedPassword(user.id) : null;
+        
+        // Refresh session encryption cache if password is available
+        if (cachedPassword) {
+          try {
+            await initializeSessionEncryption(user.id, cachedPassword);
+          } catch (initErr) {
+            console.warn('[useSecurityAlerts] Failed to refresh session encryption cache:', initErr.message);
+          }
+        }
+        
+        // Try to get sessions with decryption, but fall back to metadata if password cache expired
+        let sessions = [];
+        try {
+          sessions = await getUserSessions(user.id, cachedPassword);
+        } catch (decryptErr) {
+          // If decryption fails, use metadata-only for stale session detection
+          console.warn('[useSecurityAlerts] Failed to decrypt sessions, using metadata only:', decryptErr.message);
+          const { getSessionMetadata } = await import('../crypto/sessionManager');
+          const metadataSessions = await getSessionMetadata(user.id);
+          sessions = metadataSessions.map(meta => ({
+            ...meta,
+            rootKey: null,
+            sendKey: null,
+            recvKey: null
+          }));
+        }
+        
         sessions.forEach(session => {
           const lastUpdate = new Date(session.updatedAt || session.createdAt).getTime();
           const daysSinceUpdate = (Date.now() - lastUpdate) / (1000 * 60 * 60 * 24);
@@ -188,7 +216,7 @@ export function useSecurityAlerts() {
     // Refresh alerts periodically
     const interval = setInterval(fetchAlerts, 60000); // Every minute
     return () => clearInterval(interval);
-  }, [user?.id]);
+  }, [user?.id, getCachedPassword]);
 
   return { 
     alerts, 
@@ -252,7 +280,35 @@ export function useSecurityAlerts() {
           });
 
           // Add stale session alerts
-          const sessions = await getUserSessions(user.id);
+          // Use cached password if available to decrypt sessions
+          const cachedPassword = getCachedPassword ? getCachedPassword(user.id) : null;
+          
+          // Refresh session encryption cache if password is available
+          if (cachedPassword) {
+            try {
+              await initializeSessionEncryption(user.id, cachedPassword);
+            } catch (initErr) {
+              console.warn('[useSecurityAlerts] Failed to refresh session encryption cache:', initErr.message);
+            }
+          }
+          
+          // Try to get sessions with decryption, but fall back to metadata if password cache expired
+          let sessions = [];
+          try {
+            sessions = await getUserSessions(user.id, cachedPassword);
+          } catch (decryptErr) {
+            // If decryption fails, use metadata-only for stale session detection
+            console.warn('[useSecurityAlerts] Failed to decrypt sessions, using metadata only:', decryptErr.message);
+            const { getSessionMetadata } = await import('../crypto/sessionManager');
+            const metadataSessions = await getSessionMetadata(user.id);
+            sessions = metadataSessions.map(meta => ({
+              ...meta,
+              rootKey: null,
+              sendKey: null,
+              recvKey: null
+            }));
+          }
+          
           sessions.forEach(session => {
             const lastUpdate = new Date(session.updatedAt || session.createdAt).getTime();
             const daysSinceUpdate = (Date.now() - lastUpdate) / (1000 * 60 * 60 * 24);

@@ -28,6 +28,7 @@ import { initiateKeyRotation, respondToKeyRotation } from '../crypto/keyRotation
 import { loadSession, getSendKey, getRecvKey } from '../crypto/sessionManager';
 import { importPublicKey } from '../crypto/ecdh';
 import api from '../services/api';
+import { getBackendWebSocketURL } from '../config/backend.js';
 
 /**
  * useE2EE hook for encrypted messaging
@@ -94,6 +95,21 @@ export function useE2EE(sessionId, peerId) {
         user.id,
         peerId
       );
+
+      // SECURITY: Validate that file is encrypted before sharing
+      const { validateFileEncryption } = await import('../crypto/messageEnvelope.js');
+      const metaValidation = validateFileEncryption(fileMetaEnvelope);
+      if (!metaValidation.valid) {
+        throw new Error(metaValidation.error || 'File encryption validation failed');
+      }
+
+      // Validate all chunks are encrypted
+      for (const chunkEnvelope of chunkEnvelopes) {
+        const chunkValidation = validateFileEncryption(chunkEnvelope);
+        if (!chunkValidation.valid) {
+          throw new Error(chunkValidation.error || 'File chunk encryption validation failed');
+        }
+      }
 
       // Send via WebSocket if connected
       if (socketRef.current && socketRef.current.connected) {
@@ -223,13 +239,13 @@ export function useE2EE(sessionId, peerId) {
     if (!sessionId || !user) return;
 
     // Import socket.io-client dynamically
-    import('socket.io-client').then(({ default: io }) => {
+    import('socket.io-client').then(async ({ default: io }) => {
       const token = localStorage.getItem('accessToken') || '';
       
       // In development, use Vite proxy to avoid mixed content issues
       const wsURL = import.meta.env.DEV 
         ? window.location.origin // Use same origin (Vite proxy will handle it)
-        : 'https://localhost:8443';
+        : getBackendWebSocketURL();
       
       socketRef.current = io(wsURL, {
         transports: ['polling', 'websocket'], // Try polling first in dev (works through proxy)
@@ -285,7 +301,9 @@ export function useE2EE(sessionId, peerId) {
 
       return () => {
         if (socketRef.current) {
+          socketRef.current.removeAllListeners();
           socketRef.current.disconnect();
+          socketRef.current.close();
         }
       };
     });
@@ -296,7 +314,10 @@ export function useE2EE(sessionId, peerId) {
         if (socketRef.current._keepAliveInterval) {
           clearInterval(socketRef.current._keepAliveInterval);
         }
+        socketRef.current.removeAllListeners();
         socketRef.current.disconnect();
+        socketRef.current.close();
+        socketRef.current = null;
       }
     };
   }, [sessionId, user, handleMessage, handleKeyUpdate]);

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { logMetadataAccess } from './attackLogging.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -60,6 +61,9 @@ export function logMessageMetadataAccess(userId, sessionId, action, metadata = {
   } catch (err) {
     // Ignore sync errors, write should still be committed
   }
+
+  // Also store in MongoDB Atlas
+  logMetadataAccess(sessionId, userId, action, metadata);
 }
 
 /**

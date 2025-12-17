@@ -33,6 +33,7 @@ export function useChat(sessionId, socket, peerId = null) {
   const fileChunksRef = useRef(new Map()); // sessionId -> {meta, chunks}
   const sessionRetryRef = useRef(0); // Track retry attempts
   const sessionRetryTimeoutRef = useRef(null); // Track retry timeout
+  const sessionEstablishmentInProgressRef = useRef(false); // Prevent duplicate establishment calls
   
   // Connection state management
   const { isConnected, connectionError, reconnect } = useConnectionState(socket);
@@ -63,15 +64,17 @@ export function useChat(sessionId, socket, peerId = null) {
 
     const handleMessage = async (envelope) => {
       try {
+        console.log(`[useChat] Received message: type=${envelope.type}, sessionId=${envelope.sessionId}, seq=${envelope.seq}, sender=${envelope.sender}, receiver=${envelope.receiver}`);
         setIsDecrypting(true);
 
         const result = await handleIncomingMessage(envelope);
 
         if (result.valid) {
           if (envelope.type === 'MSG') {
-            // Text message
+            // Text message - use unique ID format matching server: sessionId:seq:timestamp
+            const messageId = `${envelope.sessionId}:${envelope.seq}:${envelope.timestamp}`;
             const newMessage = {
-              id: `${envelope.sessionId}-${envelope.seq}`,
+              id: messageId,
               type: 'text',
               content: result.plaintext,
               sender: envelope.sender,
@@ -79,8 +82,14 @@ export function useChat(sessionId, socket, peerId = null) {
               seq: envelope.seq
             };
             
-            // Add to state (sorted by sequence)
+            // Add to state (check for duplicates first, sorted by sequence)
             setMessages(prev => {
+              // Check if message already exists
+              const exists = prev.some(msg => msg.id === messageId);
+              if (exists) {
+                console.warn('Duplicate message detected, skipping:', messageId);
+                return prev;
+              }
               const updated = [...prev, newMessage].sort((a, b) => (a.seq || 0) - (b.seq || 0));
               return updated;
             });
@@ -96,21 +105,48 @@ export function useChat(sessionId, socket, peerId = null) {
               chunks: [],
               receivedAt: Date.now()
             });
-            console.log(`File metadata received: ${fileId}, expecting ${envelope.meta?.totalChunks || 'unknown'} chunks`);
+            console.log(`✓ File metadata received: ${fileId}, expecting ${envelope.meta?.totalChunks || 'unknown'} chunks`);
+            console.log('FILE_META envelope details:', {
+              sessionId: envelope.sessionId,
+              sender: envelope.sender,
+              receiver: envelope.receiver,
+              timestamp: envelope.timestamp,
+              seq: envelope.seq,
+              hasCiphertext: !!envelope.ciphertext,
+              hasIV: !!envelope.iv,
+              hasAuthTag: !!envelope.authTag,
+              meta: envelope.meta
+            });
           } else if (envelope.type === 'FILE_CHUNK') {
-            // File chunk - find matching file metadata by sessionId and timestamp proximity
+            // File chunk - NOTE: This envelope has already been validated by handleIncomingMessage()
+            // above, which applies replay protection (timestamp ±2min, sequence validation, nonce uniqueness)
+            // per spec requirement #8. The chunk is decrypted in handleIncomingMessage() but we store
+            // the envelope here and decrypt again in decryptFile() for reassembly.
+            // Find matching file metadata by sessionId and timestamp proximity
+            console.log(`✓ FILE_CHUNK received: chunkIndex=${envelope.meta?.chunkIndex}, totalChunks=${envelope.meta?.totalChunks}, sessionId=${envelope.sessionId}, timestamp=${envelope.timestamp}`);
+            
             let fileData = null;
             let fileId = null;
             
             // Find the file metadata entry - match by sessionId and similar timestamp (within 5 seconds)
             const chunkTimestamp = envelope.timestamp;
+            console.log(`Looking for matching FILE_META. Current fileChunksRef entries:`, Array.from(fileChunksRef.current.keys()));
+            
             for (const [id, data] of fileChunksRef.current.entries()) {
+              if (!data.meta) {
+                console.warn(`File data ${id} has no meta, skipping`);
+                continue;
+              }
               const timeDiff = Math.abs(data.meta.timestamp - chunkTimestamp);
+              const totalChunksMatch = data.meta.meta?.totalChunks === envelope.meta?.totalChunks;
+              console.log(`Checking file ${id}: timeDiff=${timeDiff}ms, totalChunksMatch=${totalChunksMatch}, sessionIdMatch=${data.meta.sessionId === envelope.sessionId}`);
+              
               if (data.meta.sessionId === envelope.sessionId && 
                   timeDiff < 5000 && // Within 5 seconds
-                  data.meta.meta?.totalChunks === envelope.meta?.totalChunks) {
+                  totalChunksMatch) {
                 fileData = data;
                 fileId = id;
+                console.log(`✓ Found matching FILE_META: ${fileId}`);
                 break;
               }
             }
@@ -143,8 +179,12 @@ export function useChat(sessionId, socket, peerId = null) {
                 
                 // Check if all chunks received
                 const totalChunks = fileData.meta.meta?.totalChunks || 0;
+                console.log(`File chunk progress: ${fileData.chunks.length}/${totalChunks} chunks received for ${fileId}`);
+                
                 if (fileData.chunks.length === totalChunks && totalChunks > 0) {
                   try {
+                    console.log(`✓ All chunks received for ${fileId}, starting decryption...`);
+                    
                     // Show reassembly progress
                     setFileProgress({
                       filename: 'Reassembling file...',
@@ -173,23 +213,40 @@ export function useChat(sessionId, socket, peerId = null) {
                     // Update filename once we have it
                     reassemblyFilename = decrypted.filename;
                     
-                    setFiles(prev => [...prev, {
-                      id: fileId,
-                      filename: decrypted.filename,
-                      blob: decrypted.blob,
-                      mimetype: decrypted.mimetype,
-                      size: decrypted.size,
-                      timestamp: fileData.meta.timestamp || Date.now()
-                    }]);
+                    // Add file to state (check for duplicates)
+                    setFiles(prev => {
+                      const exists = prev.some(f => f.id === fileId);
+                      if (exists) {
+                        console.warn(`File ${fileId} already exists in state, skipping duplicate`);
+                        return prev;
+                      }
+                      console.log(`✓ Adding file to state: ${decrypted.filename} (${fileId})`);
+                      return [...prev, {
+                        id: fileId,
+                        filename: decrypted.filename,
+                        blob: decrypted.blob,
+                        mimetype: decrypted.mimetype,
+                        size: decrypted.size,
+                        timestamp: fileData.meta.timestamp || Date.now(),
+                        sender: envelope.sender
+                      }];
+                    });
 
                     // Clear progress
                     setFileProgress(null);
 
                     // Clean up
                     fileChunksRef.current.delete(fileId);
-                    console.log(`✓ File decrypted and added: ${decrypted.filename}`);
+                    console.log(`✓ File decrypted and added to chat: ${decrypted.filename}`);
                   } catch (error) {
                     console.error('Failed to decrypt file:', error);
+                    console.error('Error details:', {
+                      message: error.message,
+                      stack: error.stack,
+                      fileId,
+                      totalChunks,
+                      chunksReceived: fileData.chunks.length
+                    });
                     setFileProgress(null);
                     setErrors(prev => [...prev, {
                       id: `file-error-${Date.now()}`,
@@ -268,29 +325,36 @@ export function useChat(sessionId, socket, peerId = null) {
     // Handle KEP_INIT messages
     const handleKEPInitMessage = async (kepInitMessage) => {
       if (!user?.id || !socket) {
-        console.warn('Cannot handle KEP_INIT: missing user or socket', { hasUser: !!user?.id, hasSocket: !!socket });
+        console.warn('[Chat KEP] Cannot handle KEP_INIT: missing user or socket', { hasUser: !!user?.id, hasSocket: !!socket });
         return;
       }
       
-      console.log(`[KEP] Received KEP_INIT from ${kepInitMessage.from} for session ${kepInitMessage.sessionId}`);
+      console.log(`[Chat KEP] Received KEP_INIT from ${kepInitMessage?.from} for session ${kepInitMessage?.sessionId}`);
+      console.log(`[Chat KEP] Message details:`, {
+        from: kepInitMessage?.from,
+        to: kepInitMessage?.to,
+        sessionId: kepInitMessage?.sessionId,
+        ourUserId: user.id,
+        messageType: kepInitMessage?.type
+      });
       
       try {
         const password = getCachedPassword(user.id);
         if (!password) {
-          console.error('[KEP] Password not cached for session establishment - cannot respond to KEP_INIT');
+          console.error('[Chat KEP] Password not cached for session establishment - cannot respond to KEP_INIT');
           setSessionError('Password required for session establishment. Please log out and log back in.');
           // Don't return silently - log that we're not responding
-          console.warn('[KEP] Not sending KEP_RESPONSE due to missing password cache');
+          console.warn('[Chat KEP] Not sending KEP_RESPONSE due to missing password cache');
           return;
         }
 
-        console.log(`[KEP] Processing KEP_INIT and preparing KEP_RESPONSE...`);
+        console.log(`[Chat KEP] Processing KEP_INIT and preparing KEP_RESPONSE...`);
         await handleKEPInit(kepInitMessage, user.id, password, socket);
-        console.log(`[KEP] Successfully handled KEP_INIT and sent KEP_RESPONSE`);
+        console.log(`[Chat KEP] ✓ Successfully handled KEP_INIT and sent KEP_RESPONSE`);
         setSessionError(null);
       } catch (error) {
-        console.error('[KEP] Failed to handle KEP_INIT:', error);
-        console.error('[KEP] Error details:', {
+        console.error('[Chat KEP] ✗ Failed to handle KEP_INIT:', error);
+        console.error('[Chat KEP] Error details:', {
           message: error.message,
           stack: error.stack,
           name: error.name
@@ -396,8 +460,10 @@ export function useChat(sessionId, socket, peerId = null) {
       }
 
       // Add to local messages immediately (optimistic update, sorted by sequence)
+      // Use unique ID format matching server: sessionId:seq:timestamp
+      const messageId = `${sessionId}:${envelope.seq}:${envelope.timestamp}`;
       const newMessage = {
-        id: `${sessionId}-${envelope.seq}`,
+        id: messageId,
         type: 'text',
         content: plaintext,
         sender: user.id,
@@ -407,6 +473,12 @@ export function useChat(sessionId, socket, peerId = null) {
       };
       
       setMessages(prev => {
+        // Check if message already exists (shouldn't happen for sent messages, but be safe)
+        const exists = prev.some(msg => msg.id === messageId);
+        if (exists) {
+          console.warn('Duplicate message detected when sending, skipping:', messageId);
+          return prev;
+        }
         const updated = [...prev, newMessage].sort((a, b) => (a.seq || 0) - (b.seq || 0));
         return updated;
       });
@@ -469,6 +541,21 @@ export function useChat(sessionId, socket, peerId = null) {
         }
       );
 
+      // SECURITY: Validate that file is encrypted before sharing
+      const { validateFileEncryption } = await import('../crypto/messageEnvelope.js');
+      const metaValidation = validateFileEncryption(fileMetaEnvelope);
+      if (!metaValidation.valid) {
+        throw new Error(metaValidation.error || 'File encryption validation failed');
+      }
+
+      // Validate all chunks are encrypted
+      for (const chunkEnvelope of chunkEnvelopes) {
+        const chunkValidation = validateFileEncryption(chunkEnvelope);
+        if (!chunkValidation.valid) {
+          throw new Error(chunkValidation.error || 'File chunk encryption validation failed');
+        }
+      }
+
       // Check if socket is connected before sending
       if (!socket.connected) {
         throw new Error('Socket not connected. Please wait for connection to be established.');
@@ -505,6 +592,59 @@ export function useChat(sessionId, socket, peerId = null) {
       // Clear progress
       setFileProgress(null);
       console.log(`✓ File sent: ${file.name} (${totalChunks} chunks)`);
+      
+      // Add file to sender's own state so they can see it in chat
+      // Decrypt the file for display (sender can see their own sent files)
+      try {
+        const { decryptFile } = await import('../crypto/fileDecryption.js');
+        const decrypted = await decryptFile(
+          fileMetaEnvelope,
+          chunkEnvelopes,
+          sessionId,
+          user?.id || session.userId
+        );
+        
+        // Add to files state for display
+        const fileId = `${sessionId}-file-${fileMetaEnvelope.timestamp}-${fileMetaEnvelope.seq}`;
+        setFiles(prev => {
+          // Check if file already exists (avoid duplicates)
+          const exists = prev.some(f => f.id === fileId);
+          if (exists) {
+            return prev;
+          }
+          return [...prev, {
+            id: fileId,
+            filename: decrypted.filename,
+            blob: decrypted.blob,
+            mimetype: decrypted.mimetype,
+            size: decrypted.size,
+            timestamp: fileMetaEnvelope.timestamp || Date.now(),
+            sender: user?.id || session.userId
+          }];
+        });
+        
+        console.log(`✓ File added to sender's view: ${decrypted.filename}`);
+      } catch (decryptError) {
+        // If decryption fails, still show file was sent but log the error
+        console.warn('Failed to decrypt sent file for display:', decryptError);
+        // Add file metadata without blob for display
+        const fileId = `${sessionId}-file-${fileMetaEnvelope.timestamp}-${fileMetaEnvelope.seq}`;
+        setFiles(prev => {
+          const exists = prev.some(f => f.id === fileId);
+          if (exists) {
+            return prev;
+          }
+          return [...prev, {
+            id: fileId,
+            filename: file.name,
+            mimetype: file.type || 'application/octet-stream',
+            size: file.size,
+            timestamp: fileMetaEnvelope.timestamp || Date.now(),
+            sender: user?.id || session.userId,
+            blob: null // Will need to be decrypted when downloaded
+          }];
+        });
+      }
     } catch (error) {
       // Clear progress on error
       setFileProgress(null);
@@ -537,6 +677,12 @@ export function useChat(sessionId, socket, peerId = null) {
   // Check if session exists and establish if needed
   useEffect(() => {
     if (!sessionId || !user?.id || !socket || isEstablishingSession) return;
+    
+    // Prevent duplicate calls - if establishment is already in progress, skip
+    if (sessionEstablishmentInProgressRef.current) {
+      console.log(`[useChat] Session establishment already in progress for ${sessionId}, skipping duplicate call`);
+      return;
+    }
 
     // If peerId is not set, we can't establish a new session
     // But we can still check if an existing session exists
@@ -562,6 +708,13 @@ export function useChat(sessionId, socket, peerId = null) {
     }
 
     const checkAndEstablishSession = async () => {
+      // Check if we're rate limited (sessionRetryRef.current >= 999 indicates rate limit)
+      if (sessionRetryRef.current >= 999) {
+        console.warn('Session establishment is rate limited. Please wait before trying again.');
+        setSessionError('Too many session establishment attempts. Please wait a few minutes before trying again.');
+        return;
+      }
+      
       try {
         const password = getCachedPassword(user.id);
         if (!password) {
@@ -571,12 +724,21 @@ export function useChat(sessionId, socket, peerId = null) {
           }
           
           // If user is authenticated but password cache is missing, it's likely a page refresh
-          // Don't retry - password won't magically appear, user needs to log in again
+          // Try to refresh the session encryption cache from IndexedDB first
           if (isAuthenticated) {
-            console.error('Password cache missing for authenticated user. User needs to log out and log back in.');
-            setSessionError('Password cache expired. Please log out and log back in to re-establish your session encryption keys.');
-            sessionRetryRef.current = 0; // Reset for next attempt
-            return;
+            try {
+              const { initializeSessionEncryption } = await import('../crypto/sessionManager');
+              // Try to use the session encryption key cache if it's still valid
+              // This allows sessions to work even if password cache expired but encryption key cache is still valid
+              console.warn('[useChat] Password cache expired, but checking if session encryption cache is still valid...');
+              // We can't initialize without password, but loadSession will try to use cached encryption key
+              // So we'll just proceed and let loadSession handle it
+            } catch (initErr) {
+              console.error('Password cache missing for authenticated user. User needs to log out and log back in.');
+              setSessionError('Password cache expired. Please log out and log back in to re-establish your session encryption keys.');
+              sessionRetryRef.current = 0; // Reset for next attempt
+              return;
+            }
           }
           
           // If not authenticated, retry a few times in case authentication is in progress
@@ -609,26 +771,56 @@ export function useChat(sessionId, socket, peerId = null) {
         // Reset retry counter on success
         sessionRetryRef.current = 0;
 
-        // Check if session exists
+        // Check if session exists locally FIRST - prevent unnecessary key exchange
         try {
           const session = await loadSession(sessionId, user.id, password);
-          if (session) {
+          if (session && session.rootKey && session.sendKey && session.recvKey) {
+            console.log(`[useChat] ✓ Session ${sessionId} exists locally with keys - preventing unnecessary key regeneration`);
+            console.log(`[useChat] ✓ Reusing existing session keys for session ${sessionId}`);
             setSessionError(null);
-            return; // Session exists
+            return; // Session exists locally with keys - no need to establish
+          } else if (session) {
+            console.log(`[useChat] ⚠️ Session ${sessionId} exists but missing keys - will establish keys`);
           }
         } catch (loadError) {
-          // Session doesn't exist - that's OK, we'll establish it
-          console.log('Session not found, establishing new session...');
+          // Session doesn't exist locally - check backend to confirm it should exist
+          console.log(`[useChat] Session ${sessionId} not found locally, checking backend...`);
+          
+          try {
+            const api = (await import('../services/api')).default;
+            const response = await api.get(`/sessions/${sessionId}`);
+            
+            if (response.data.success && response.data.data.session) {
+              // Session exists in backend but not locally - keys need to be established
+              console.log(`[useChat] Session ${sessionId} exists in backend but keys not in IndexedDB - will establish keys`);
+              setSessionError(null);
+              // Continue to establish session keys
+            } else {
+              console.log(`[useChat] Session ${sessionId} not found in backend, establishing new session...`);
+            }
+          } catch (apiError) {
+            // Backend check failed - proceed with establishment
+            console.log(`[useChat] Could not verify session in backend, proceeding with establishment:`, apiError.message);
+          }
         }
 
-        // Session doesn't exist - establish it
+        // Session doesn't exist or keys are missing - establish it
+        // Set guard to prevent duplicate calls
+        if (sessionEstablishmentInProgressRef.current) {
+          console.log(`[useChat] ⚠️ Session establishment already in progress for ${sessionId} - preventing duplicate call`);
+          return;
+        }
+        
+        sessionEstablishmentInProgressRef.current = true;
         setIsEstablishingSession(true);
         setSessionError(null);
 
         try {
+          console.log(`[useChat] Generating session keys for new session ${sessionId} with peer ${peerId}...`);
+          console.log(`[useChat] Initiating ECDH key exchange and HKDF derivation...`);
           await initiateSession(user.id, peerId, password, socket);
           setSessionError(null);
-          console.log('✓ Session established successfully');
+          console.log(`[useChat] ✓ Session ${sessionId} established successfully with new keys`);
         } catch (error) {
           // Capture full error details for debugging
           const errorDetails = {
@@ -673,6 +865,10 @@ export function useChat(sessionId, socket, peerId = null) {
             userMessage = 'The other user is not currently online. They must be connected to establish a secure session.';
           } else if (errorMessage.includes('timeout') || errorMessage.includes('No response from peer')) {
             userMessage = 'Session establishment timed out. The other user may be offline or not responding. Please try again when they are online.';
+          } else if (errorMessage.includes('rate limit') || errorMessage.includes('Rate limit exceeded')) {
+            userMessage = 'Too many session establishment attempts. Please wait a few minutes before trying again.';
+            // Don't retry on rate limit - wait for user to manually retry
+            sessionRetryRef.current = 999; // Set high to prevent auto-retry
           }
           
           setErrors(prev => [...prev, {
@@ -684,11 +880,13 @@ export function useChat(sessionId, socket, peerId = null) {
           }]);
         } finally {
           setIsEstablishingSession(false);
+          sessionEstablishmentInProgressRef.current = false; // Clear guard
         }
       } catch (error) {
-        console.error('Session check error:', error);
+        console.error('[useChat] Session check error:', error);
         setSessionError(error.message || 'Failed to check session');
         setIsEstablishingSession(false);
+        sessionEstablishmentInProgressRef.current = false; // Clear guard on error
       }
     };
 
@@ -701,8 +899,12 @@ export function useChat(sessionId, socket, peerId = null) {
         sessionRetryTimeoutRef.current = null;
       }
       sessionRetryRef.current = 0;
+      sessionEstablishmentInProgressRef.current = false; // Clear guard on cleanup
     };
-  }, [sessionId, user?.id, peerId, socket, getCachedPassword, isEstablishingSession]);
+    // Dependencies: Only re-run if these change
+    // Note: getCachedPassword is stable (from useAuth), isEstablishingSession prevents loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, user?.id, peerId, socket?.id, isEstablishingSession]);
 
   // Remove old errors (older than 10 seconds)
   useEffect(() => {

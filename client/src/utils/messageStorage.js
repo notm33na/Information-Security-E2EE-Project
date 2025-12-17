@@ -6,7 +6,7 @@
  */
 
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 7; // Database version (must match highest version used by any module)
+const DB_VERSION = 8; // Database version (must match highest version used by any module)
 const MESSAGES_STORE = 'messages';
 
 /**

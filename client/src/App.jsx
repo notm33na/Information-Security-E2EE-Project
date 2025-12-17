@@ -11,6 +11,7 @@ import Keys from './pages/Keys';
 import Alerts from './pages/Alerts';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
+import ReplayAttackDemo from './pages/ReplayAttackDemo';
 import NotFound from './pages/NotFound';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { AppLayout } from './components/layout/AppLayout';
@@ -96,6 +97,14 @@ function App() {
           element={
             <ProtectedRoute>
               <Settings />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/replay-demo"
+          element={
+            <ProtectedRoute>
+              <ReplayAttackDemo />
             </ProtectedRoute>
           }
         />

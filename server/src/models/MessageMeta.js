@@ -54,7 +54,8 @@ const messageMetaSchema = new mongoose.Schema({
     size: Number,
     totalChunks: Number,
     chunkIndex: Number,
-    mimetype: String
+    mimetype: String,
+    fileId: String // File ID for files uploaded to storage
   },
   nonceHash: {
     type: String,

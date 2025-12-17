@@ -11,7 +11,11 @@
     "test": "echo 'Tests can be run with: node integration/fullSystemTest.js'",
     "test:attacks": "cd client && npm run test:attacks",
     "test:mitm": "cd client && npm run test:attacks -- mitm_attack_demonstration.test.js",
-    "start": "cd server && npm start"
+    "start": "cd server && npm start",
+    "replay-attack": "node scripts/run-replay-attack-simulation.js",
+    "replay-attack:help": "node scripts/run-replay-attack-simulation.js --help",
+    "mitm-attack": "node scripts/run-mitm-attack-simulation.js",
+    "mitm-attack:help": "node scripts/run-mitm-attack-simulation.js --help"
   },
   "keywords": [
     "e2ee",

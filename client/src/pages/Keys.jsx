@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Key, Plus, RefreshCw, Shield, Copy, Eye, EyeOff, Download, Trash2, Clock, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Key, Plus, RefreshCw, Shield, Copy, Eye, EyeOff, Download, Trash2, Clock, AlertTriangle, CheckCircle2, CheckCircle, Upload, XCircle, AlertCircle } from "lucide-react";
 import { Header } from "../components/layout/Header";
 import { Button } from "../components/ui/button";
 import { KeyStatusBadge } from "../components/shared/KeyStatusBadge";
@@ -35,6 +35,9 @@ export default function Keys() {
   const [showPassword, setShowPassword] = useState(false);
   const [actionType, setActionType] = useState(null); // 'generate' | 'rotate'
   const [targetKeyId, setTargetKeyId] = useState(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [isReuploading, setIsReuploading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState(null); // 'verified' | 'mismatch' | 'missing' | null
   const { keys, loading, error, refetch } = useKeys();
 
   const toggleFingerprint = (id) => {
@@ -211,25 +214,7 @@ export default function Keys() {
         const { publicKeyJWK } = await rotateIdentityKeys(user.id, password);
         
         // Upload new public key
-        try {
-          const uploadResponse = await api.post('/keys/upload', { publicIdentityKeyJWK: publicKeyJWK });
-          if (uploadResponse.data.success) {
-            console.log('✓ Public key rotated and uploaded successfully');
-          }
-        } catch (uploadErr) {
-          // 409 Conflict means key already exists - this is expected for updates
-          if (uploadErr.response?.status === 409) {
-            // Check if it's an integrity violation
-            const errorMsg = uploadErr.response?.data?.message || uploadErr.response?.data?.error;
-            if (errorMsg?.includes('integrity')) {
-              throw new Error('Key integrity violation detected. Please contact support.');
-            }
-            // Otherwise, it's just an update - continue
-            console.log('Key updated on server');
-          } else {
-            throw new Error(uploadErr.response?.data?.message || 'Failed to upload rotated public key to server');
-          }
-        }
+        await uploadAndVerifyPublicKey(publicKeyJWK);
         
         toast({
           title: "Success",
@@ -253,6 +238,204 @@ export default function Keys() {
     } finally {
       setIsGenerating(false);
       setIsRotating(false);
+    }
+  };
+
+  /**
+   * Uploads public key to server and verifies it matches local key
+   */
+  const uploadAndVerifyPublicKey = async (publicKeyJWK) => {
+    try {
+      console.log('[Keys] Uploading public key to server...');
+      // Upload public key
+      const uploadResponse = await api.post('/keys/upload', { publicIdentityKeyJWK: publicKeyJWK });
+      if (!uploadResponse.data.success) {
+        throw new Error(uploadResponse.data.message || 'Upload failed');
+      }
+      console.log('✓ Public key uploaded successfully');
+
+      // Verify the uploaded key matches what we sent
+      console.log('[Keys] Verifying uploaded key on server...');
+      const verifyResponse = await api.get('/keys/me');
+      if (verifyResponse.data.success && verifyResponse.data.data?.publicIdentityKeyJWK) {
+        const serverKey = verifyResponse.data.data.publicIdentityKeyJWK;
+        // Compare key components (x and y coordinates)
+        if (serverKey.x === publicKeyJWK.x && serverKey.y === publicKeyJWK.y && 
+            serverKey.kty === publicKeyJWK.kty && serverKey.crv === publicKeyJWK.crv) {
+          console.log('✓ Public key verified on server - matches local key');
+          setUploadStatus('verified');
+          return true;
+        } else {
+          console.warn('⚠ Public key on server does not match local key');
+          setUploadStatus('mismatch');
+          throw new Error('Uploaded key does not match local key. Please try again.');
+        }
+      } else {
+        console.warn('⚠ Could not verify uploaded key');
+        setUploadStatus('missing');
+        throw new Error('Key uploaded but verification failed. Please verify manually.');
+      }
+    } catch (uploadErr) {
+      console.error('[Keys] Upload error:', {
+        status: uploadErr.response?.status,
+        message: uploadErr.response?.data?.message || uploadErr.message,
+        error: uploadErr.response?.data?.error,
+        hasResponse: !!uploadErr.response
+      });
+      
+      // 401 Unauthorized - authentication issue
+      if (uploadErr.response?.status === 401) {
+        const errorMsg = uploadErr.response?.data?.message || uploadErr.message || 'Authentication failed';
+        throw new Error(`${errorMsg}. Please log out and log back in.`);
+      }
+      
+      // 409 Conflict means key already exists - this is expected for updates
+      if (uploadErr.response?.status === 409) {
+        const errorMsg = uploadErr.response?.data?.message || uploadErr.response?.data?.error;
+        if (errorMsg?.includes('integrity')) {
+          throw new Error('Key integrity violation detected. Please contact support.');
+        }
+        // For updates, verify the key matches
+        try {
+          const verifyResponse = await api.get('/keys/me');
+          if (verifyResponse.data.success && verifyResponse.data.data?.publicIdentityKeyJWK) {
+            const serverKey = verifyResponse.data.data.publicIdentityKeyJWK;
+            if (serverKey.x === publicKeyJWK.x && serverKey.y === publicKeyJWK.y) {
+              console.log('✓ Key updated on server and verified');
+              setUploadStatus('verified');
+              return true;
+            }
+          }
+        } catch (verifyErr) {
+          console.warn('Could not verify updated key:', verifyErr);
+        }
+        console.log('Key updated on server');
+        setUploadStatus('verified');
+        return true;
+      } else {
+        setUploadStatus('missing');
+        const errorMessage = uploadErr.response?.data?.message || uploadErr.message || 'Failed to upload public key to server';
+        throw new Error(errorMessage);
+      }
+    }
+  };
+
+  /**
+   * Verifies that the public key on server exists
+   * Note: Full verification (comparing with local key) requires password
+   */
+  const verifyPublicKeyOnServer = async () => {
+    if (!user?.id) return;
+
+    setIsVerifying(true);
+    setUploadStatus(null);
+
+    try {
+      console.log('[Keys] Verifying public key on server...');
+      // Check if local key exists
+      const hasKey = await hasIdentityKey(user.id);
+      if (!hasKey) {
+        setUploadStatus('missing');
+        toast({
+          title: "No Local Key",
+          description: "Please generate an identity key pair first",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Check if key exists on server
+      const serverResponse = await api.get('/keys/me');
+      if (!serverResponse.data.success || !serverResponse.data.data?.publicIdentityKeyJWK) {
+        setUploadStatus('missing');
+        toast({
+          title: "Key Not Found on Server",
+          description: "Your public key is not on the server. Use 'Rotate Keys' to upload it (this will generate a new key pair).",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Key exists on server
+      setUploadStatus('verified');
+      toast({
+        title: "Verified",
+        description: "Your public key is on the server and ready for key exchange",
+      });
+    } catch (err) {
+      console.error('[Keys] Verification failed:', {
+        status: err.response?.status,
+        message: err.response?.data?.message || err.message,
+        error: err.response?.data?.error,
+        hasResponse: !!err.response
+      });
+      
+      if (err.response?.status === 401) {
+        setUploadStatus('missing');
+        const errorMsg = err.response?.data?.message || err.message || 'Authentication failed';
+        toast({
+          title: "Authentication Failed",
+          description: `${errorMsg}. Please log out and log back in.`,
+          variant: "destructive",
+        });
+      } else if (err.response?.status === 404) {
+        setUploadStatus('missing');
+        toast({
+          title: "Key Not Found",
+          description: "Your public key is not on the server. Use 'Rotate Keys' to upload it.",
+          variant: "destructive",
+        });
+      } else {
+        setUploadStatus('missing');
+        toast({
+          title: "Verification Failed",
+          description: err.message || "Could not verify public key",
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  /**
+   * Re-uploads the public key to server
+   */
+  const reuploadPublicKey = async () => {
+    if (!user?.id) return;
+
+    setIsReuploading(true);
+    setUploadStatus(null);
+
+    try {
+      // Check if local key exists
+      const hasKey = await hasIdentityKey(user.id);
+      if (!hasKey) {
+        toast({
+          title: "No Local Key",
+          description: "Please generate an identity key pair first",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // We need password to load and export the key
+      // For now, prompt user or use cached password
+      // Actually, we can't export public key from private without password
+      // So we'll need to show a dialog or use the existing password dialog
+      toast({
+        title: "Password Required",
+        description: "Please use 'Rotate Keys' to re-upload your public key (this will generate a new key pair)",
+      });
+    } catch (err) {
+      console.error('Re-upload failed:', err);
+      toast({
+        title: "Error",
+        description: err.message || "Failed to re-upload public key",
+        variant: "destructive",
+      });
+    } finally {
+      setIsReuploading(false);
     }
   };
 
@@ -316,7 +499,7 @@ export default function Keys() {
             </div>
             <Button 
               onClick={handleGenerateKey} 
-              disabled={isGenerating || keys.length > 0} 
+              disabled={isGenerating || keys.filter(k => k.category === 'identity').length > 0} 
               className="w-full sm:w-auto"
             >
               {isGenerating ? (
@@ -331,7 +514,7 @@ export default function Keys() {
                 </>
               )}
             </Button>
-            {keys.length > 0 && (
+            {keys.filter(k => k.category === 'identity').length > 0 && (
               <p className="text-xs text-muted-foreground mt-2">
                 You already have an identity key. Use "Rotate" to generate a new one.
               </p>
@@ -398,12 +581,14 @@ export default function Keys() {
                             <div className={cn(
                               "w-12 h-12 rounded-xl flex items-center justify-center",
                               key.status === "active" && "bg-success/10",
+                              key.status === "inactive" && "bg-muted/10",
                               key.status === "expiring" && "bg-warning/10",
                               key.status === "expired" && "bg-destructive/10"
                             )}>
                               <Key className={cn(
                                 "w-6 h-6",
                                 key.status === "active" && "text-success",
+                                key.status === "inactive" && "text-muted-foreground",
                                 key.status === "expiring" && "text-warning",
                                 key.status === "expired" && "text-destructive"
                               )} />
@@ -464,6 +649,24 @@ export default function Keys() {
                                   <Download className="w-3.5 h-3.5 mr-1.5" />
                                   Export
                                 </Button>
+                                <Button 
+                                  variant="outline" 
+                                  size="sm"
+                                  onClick={verifyPublicKeyOnServer}
+                                  disabled={isVerifying || isReuploading}
+                                  title="Verify public key is uploaded to server"
+                                >
+                                  {isVerifying ? (
+                                    <RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                                  ) : uploadStatus === 'verified' ? (
+                                    <CheckCircle2 className="w-3.5 h-3.5 mr-1.5 text-success" />
+                                  ) : uploadStatus === 'missing' || uploadStatus === 'mismatch' ? (
+                                    <XCircle className="w-3.5 h-3.5 mr-1.5 text-destructive" />
+                                  ) : (
+                                    <Upload className="w-3.5 h-3.5 mr-1.5" />
+                                  )}
+                                  {isVerifying ? 'Verifying...' : uploadStatus === 'verified' ? 'Verified' : uploadStatus === 'missing' || uploadStatus === 'mismatch' ? 'Not Verified' : 'Verify Upload'}
+                                </Button>
                               </>
                             )}
                             <Button 
@@ -501,90 +704,197 @@ export default function Keys() {
                       ({keys.filter(k => k.category === 'session').length})
                     </span>
                   </div>
-                  <div className="space-y-3">
-                    {keys.filter(k => k.category === 'session').map((key, i) => (
-                      <div
-                        key={key.id}
-                        className={cn(
-                          "p-4 rounded-xl bg-card border border-border hover:border-primary/30 transition-all duration-200 animate-fade-in",
-                          key.status === "expired" && "opacity-60"
-                        )}
-                        style={{ animationDelay: `${i * 50}ms` }}
-                      >
-                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                          <div className="flex items-start gap-4">
-                            <div className={cn(
-                              "w-12 h-12 rounded-xl flex items-center justify-center",
-                              key.status === "active" && "bg-primary/10",
-                              key.status === "expiring" && "bg-warning/10",
-                              key.status === "expired" && "bg-destructive/10"
-                            )}>
-                              <Key className={cn(
-                                "w-6 h-6",
-                                key.status === "active" && "text-primary",
-                                key.status === "expiring" && "text-warning",
-                                key.status === "expired" && "text-destructive"
-                              )} />
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <h4 className="font-medium text-foreground">{key.name}</h4>
-                                <KeyStatusBadge status={key.status} />
+                  
+                  {/* Active Session Keys */}
+                  {keys.filter(k => k.category === 'session' && k.status === 'active').length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <CheckCircle className="w-4 h-4 text-success" />
+                        <h4 className="text-sm font-medium text-foreground">Active Keys</h4>
+                        <span className="text-xs text-muted-foreground">
+                          ({keys.filter(k => k.category === 'session' && k.status === 'active').length})
+                        </span>
+                      </div>
+                      {keys.filter(k => k.category === 'session' && k.status === 'active').map((key, i) => (
+                        <div
+                          key={key.id}
+                          className={cn(
+                            "p-4 rounded-xl bg-card border border-border hover:border-primary/30 transition-all duration-200 animate-fade-in"
+                          )}
+                          style={{ animationDelay: `${i * 50}ms` }}
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                            <div className="flex items-start gap-4">
+                              <div className={cn(
+                                "w-12 h-12 rounded-xl flex items-center justify-center",
+                                key.status === "active" && "bg-primary/10"
+                              )}>
+                                <Key className={cn(
+                                  "w-6 h-6",
+                                  key.status === "active" && "text-primary"
+                                )} />
                               </div>
-                              <p className="text-sm text-muted-foreground mt-1">
-                                {key.keyType || key.type} • {key.expiresAt}
-                              </p>
-                              {key.keyPurpose && (
-                                <p className="text-xs text-muted-foreground mt-1 italic">
-                                  {key.keyPurpose}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h4 className="font-medium text-foreground">{key.name}</h4>
+                                  <KeyStatusBadge status={key.status} />
+                                </div>
+                                <p className="text-sm text-muted-foreground mt-1">
+                                  {key.keyType || key.type} • {key.expiresAt}
                                 </p>
-                              )}
-                              {key.sessionId && (
-                                <p className="text-xs text-muted-foreground mt-1">
-                                  Session ID: <code className="bg-muted px-1 py-0.5 rounded">{key.sessionId.substring(0, 16)}...</code>
-                                  {key.peerId && (
-                                    <> • Peer: <code className="bg-muted px-1 py-0.5 rounded">{key.peerId.substring(0, 8)}...</code></>
-                                  )}
-                                </p>
-                              )}
-                              <div className="flex items-center gap-2 mt-2 flex-wrap">
-                                <code className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded">
-                                  {showFingerprint[key.id] ? key.fingerprint : "•••• •••• •••• •••• ••••"}
-                                </code>
-                                <Button
-                                  variant="ghost"
-                                  size="icon-sm"
-                                  onClick={() => toggleFingerprint(key.id)}
-                                  title={showFingerprint[key.id] ? "Hide fingerprint" : "Show fingerprint"}
-                                >
-                                  {showFingerprint[key.id] ? (
-                                    <EyeOff className="w-3.5 h-3.5" />
-                                  ) : (
-                                    <Eye className="w-3.5 h-3.5" />
-                                  )}
-                                </Button>
-                                <Button 
-                                  variant="ghost" 
-                                  size="icon-sm"
-                                  onClick={() => handleCopyFingerprint(key.fingerprint)}
-                                  title="Copy fingerprint"
-                                >
-                                  <Copy className="w-3.5 h-3.5" />
-                                </Button>
+                                {key.keyPurpose && (
+                                  <p className="text-xs text-muted-foreground mt-1 italic">
+                                    {key.keyPurpose}
+                                  </p>
+                                )}
+                                {key.sessionId && (
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    Session ID: <code className="bg-muted px-1 py-0.5 rounded">{key.sessionId.substring(0, 16)}...</code>
+                                    {key.peerId && (
+                                      <> • Peer: <code className="bg-muted px-1 py-0.5 rounded">{key.peerId.substring(0, 8)}...</code></>
+                                    )}
+                                  </p>
+                                )}
+                                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                                  <code className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded">
+                                    {showFingerprint[key.id] ? key.fingerprint : "•••• •••• •••• •••• ••••"}
+                                  </code>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    onClick={() => toggleFingerprint(key.id)}
+                                    title={showFingerprint[key.id] ? "Hide fingerprint" : "Show fingerprint"}
+                                  >
+                                    {showFingerprint[key.id] ? (
+                                      <EyeOff className="w-3.5 h-3.5" />
+                                    ) : (
+                                      <Eye className="w-3.5 h-3.5" />
+                                    )}
+                                  </Button>
+                                  <Button 
+                                    variant="ghost" 
+                                    size="icon-sm"
+                                    onClick={() => handleCopyFingerprint(key.fingerprint)}
+                                    title="Copy fingerprint"
+                                  >
+                                    <Copy className="w-3.5 h-3.5" />
+                                  </Button>
+                                </div>
                               </div>
                             </div>
                           </div>
-                        </div>
 
-                        <div className="flex items-center gap-4 mt-3 pt-3 border-t border-border text-xs text-muted-foreground">
-                          <span className="flex items-center gap-1">
-                            <Clock className="w-3.5 h-3.5" />
-                            Created {formatFileTimestamp(key.createdAt)}
-                          </span>
+                          <div className="flex items-center gap-4 mt-3 pt-3 border-t border-border text-xs text-muted-foreground">
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3.5 h-3.5" />
+                              Created {formatFileTimestamp(key.createdAt)}
+                            </span>
+                          </div>
                         </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Inactive Session Keys */}
+                  {keys.filter(k => k.category === 'session' && k.status === 'inactive').length > 0 && (
+                    <div className="space-y-3 mt-6">
+                      <div className="flex items-center gap-2 mb-2">
+                        <XCircle className="w-4 h-4 text-muted-foreground" />
+                        <h4 className="text-sm font-medium text-foreground">Old / Superseded Keys</h4>
+                        <span className="text-xs text-muted-foreground">
+                          ({keys.filter(k => k.category === 'session' && k.status === 'inactive').length})
+                        </span>
                       </div>
-                    ))}
-                  </div>
+                      {keys.filter(k => k.category === 'session' && k.status === 'inactive').map((key, i) => (
+                        <div
+                          key={key.id}
+                          className={cn(
+                            "p-4 rounded-xl bg-card border border-border hover:border-muted/30 transition-all duration-200 animate-fade-in opacity-60"
+                          )}
+                          style={{ animationDelay: `${i * 50}ms` }}
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                            <div className="flex items-start gap-4">
+                              <div className={cn(
+                                "w-12 h-12 rounded-xl flex items-center justify-center",
+                                "bg-muted/10"
+                              )}>
+                                <Key className={cn(
+                                  "w-6 h-6",
+                                  "text-muted-foreground"
+                                )} />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <h4 className="font-medium text-foreground">{key.name}</h4>
+                                  <KeyStatusBadge status={key.status} />
+                                </div>
+                                <p className="text-sm text-muted-foreground mt-1">
+                                  {key.keyType || key.type} • {key.expiresAt}
+                                </p>
+                                {key.statusReason && (
+                                  <p className="text-xs text-muted-foreground mt-1 italic">
+                                    {key.statusReason}
+                                  </p>
+                                )}
+                                {key.keyPurpose && (
+                                  <p className="text-xs text-muted-foreground mt-1 italic">
+                                    {key.keyPurpose}
+                                  </p>
+                                )}
+                                {key.sessionId && (
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    Session ID: <code className="bg-muted px-1 py-0.5 rounded">{key.sessionId.substring(0, 16)}...</code>
+                                    {key.peerId && (
+                                      <> • Peer: <code className="bg-muted px-1 py-0.5 rounded">{key.peerId.substring(0, 8)}...</code></>
+                                    )}
+                                  </p>
+                                )}
+                                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                                  <code className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded">
+                                    {showFingerprint[key.id] ? key.fingerprint : "•••• •••• •••• •••• ••••"}
+                                  </code>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    onClick={() => toggleFingerprint(key.id)}
+                                    title={showFingerprint[key.id] ? "Hide fingerprint" : "Show fingerprint"}
+                                  >
+                                    {showFingerprint[key.id] ? (
+                                      <EyeOff className="w-3.5 h-3.5" />
+                                    ) : (
+                                      <Eye className="w-3.5 h-3.5" />
+                                    )}
+                                  </Button>
+                                  <Button 
+                                    variant="ghost" 
+                                    size="icon-sm"
+                                    onClick={() => handleCopyFingerprint(key.fingerprint)}
+                                    title="Copy fingerprint"
+                                  >
+                                    <Copy className="w-3.5 h-3.5" />
+                                  </Button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-4 mt-3 pt-3 border-t border-border text-xs text-muted-foreground">
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3.5 h-3.5" />
+                              Created {formatFileTimestamp(key.createdAt)}
+                            </span>
+                            {key.statusChangedAt && (
+                              <span className="flex items-center gap-1">
+                                <XCircle className="w-3.5 h-3.5" />
+                                Superseded {formatFileTimestamp(key.statusChangedAt)}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </>

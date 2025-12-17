@@ -184,3 +184,47 @@ export function validateEnvelopeStructure(envelope) {
   return { valid: true };
 }
 
+/**
+ * Validates that a file envelope is properly encrypted
+ * @param {Object} envelope - File envelope to validate (FILE_META or FILE_CHUNK)
+ * @returns {{valid: boolean, error?: string}}
+ */
+export function validateFileEncryption(envelope) {
+  // Only validate FILE_META and FILE_CHUNK types
+  if (envelope.type !== 'FILE_META' && envelope.type !== 'FILE_CHUNK') {
+    return { valid: true }; // Not a file message, skip validation
+  }
+
+  // Check that encryption fields are present
+  if (!envelope.ciphertext || !envelope.iv || !envelope.authTag) {
+    return {
+      valid: false,
+      error: 'Only encrypted files can be shared. File messages must include ciphertext, iv, and authTag.'
+    };
+  }
+
+  // Validate encryption fields are non-empty strings (base64 encoded)
+  if (typeof envelope.ciphertext !== 'string' || envelope.ciphertext.trim().length === 0) {
+    return {
+      valid: false,
+      error: 'Invalid encryption: ciphertext must be a non-empty base64 string'
+    };
+  }
+
+  if (typeof envelope.iv !== 'string' || envelope.iv.trim().length === 0) {
+    return {
+      valid: false,
+      error: 'Invalid encryption: iv must be a non-empty base64 string'
+    };
+  }
+
+  if (typeof envelope.authTag !== 'string' || envelope.authTag.trim().length === 0) {
+    return {
+      valid: false,
+      error: 'Invalid encryption: authTag must be a non-empty base64 string'
+    };
+  }
+
+  return { valid: true };
+}
+

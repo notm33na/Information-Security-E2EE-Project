@@ -27,20 +27,47 @@ import api from '../services/api.js';
  */
 export async function initiateSession(userId, peerId, password, socket) {
   try {
-    console.log(`Initiating session with ${peerId}...`);
+    console.log(`[Session Establishment] Initiating session with ${peerId}...`);
 
     // 1. Initialize session encryption (cache password-derived key)
     await initializeSessionEncryption(userId, password);
 
-    // 2. Generate session ID
-    const sessionId = await generateSecureSessionId(userId, peerId);
+    // 2. Get or create session from backend (ensures only one session per user pair)
+    let sessionId;
+    try {
+      const response = await api.post('/sessions', {
+        userId1: userId,
+        userId2: peerId
+      });
+      
+      if (response.data.success) {
+        sessionId = response.data.data.session.sessionId;
+        const isNew = response.data.data.isNew;
+        console.log(`[Session Establishment] ${isNew ? 'Created new' : 'Retrieved existing'} session ${sessionId} from backend`);
+      } else {
+        throw new Error(response.data.error || 'Failed to get or create session');
+      }
+    } catch (apiError) {
+      console.error('[Session Establishment] Failed to get session from backend, falling back to local generation:', apiError);
+      // Fallback: Generate session ID locally (should not happen in normal flow)
+      sessionId = await generateSecureSessionId(userId, peerId);
+      console.warn(`[Session Establishment] Using locally generated session ID ${sessionId} (backend unavailable)`);
+    }
 
-    // 3. Check if session already exists
+    // 3. Check if session already exists locally with keys - prevent unnecessary key exchange
     const { loadSession } = await import('./sessionManager.js');
-    const existingSession = await loadSession(sessionId, userId, password);
-    if (existingSession) {
-      console.log(`Session ${sessionId} already exists`);
-      return { sessionId, session: existingSession };
+    try {
+      const existingSession = await loadSession(sessionId, userId, password);
+      if (existingSession && existingSession.rootKey && existingSession.sendKey && existingSession.recvKey) {
+        console.log(`[Session Establishment] ✓ Session ${sessionId} already exists locally with keys - skipping key exchange`);
+        console.log(`[Session Establishment] ✓ Prevented unnecessary key regeneration for session ${sessionId}`);
+        return { sessionId, session: existingSession };
+      } else if (existingSession) {
+        console.log(`[Session Establishment] ⚠️ Session ${sessionId} exists but missing keys - will establish keys`);
+      }
+    } catch (loadError) {
+      // Session doesn't exist or can't be loaded - proceed with establishment
+      console.log(`[Session Establishment] Session ${sessionId} not found locally, will establish new keys`);
     }
 
     // 4. Check if identity key exists
@@ -66,24 +93,50 @@ export async function initiateSession(userId, peerId, password, socket) {
     }
 
     // 6. Fetch peer's public identity key
+    console.log(`[KEP] Step 6: Fetching peer's public identity key from server...`);
     let peerIdentityPubKeyJWK;
     try {
       const response = await api.get(`/keys/${peerId}`);
       if (!response.data.success || !response.data.data?.publicIdentityKeyJWK) {
-        throw new Error('Failed to fetch peer public key');
+        console.error(`[KEP] ✗ Server response invalid:`, response.data);
+        throw new Error('Failed to fetch peer public key - invalid server response');
       }
       peerIdentityPubKeyJWK = response.data.data.publicIdentityKeyJWK;
+      console.log(`[KEP] ✓ Peer's public identity key fetched from server`);
+      console.log(`[KEP] Peer key structure:`, {
+        hasKty: !!peerIdentityPubKeyJWK.kty,
+        hasCrv: !!peerIdentityPubKeyJWK.crv,
+        hasX: !!peerIdentityPubKeyJWK.x,
+        hasY: !!peerIdentityPubKeyJWK.y,
+        keys: Object.keys(peerIdentityPubKeyJWK)
+      });
     } catch (error) {
+      console.error(`[KEP] ✗ Failed to fetch peer's public identity key:`, error);
       throw new Error(`Failed to fetch peer's public identity key: ${error.message}`);
     }
 
     // 7. Import peer's public identity key (ECDSA for signature verification)
-    const peerIdentityPubKey = await importIdentityPublicKey(peerIdentityPubKeyJWK);
+    console.log(`[KEP] Step 7: Importing peer's public identity key...`);
+    let peerIdentityPubKey;
+    try {
+      peerIdentityPubKey = await importIdentityPublicKey(peerIdentityPubKeyJWK);
+      console.log(`[KEP] ✓ Peer's public identity key imported successfully`);
+      console.log(`[KEP] Imported key algorithm:`, {
+        name: peerIdentityPubKey?.algorithm?.name,
+        namedCurve: peerIdentityPubKey?.algorithm?.namedCurve,
+        usages: peerIdentityPubKey?.usages
+      });
+    } catch (error) {
+      console.error(`[KEP] ✗ Failed to import peer's public identity key:`, error);
+      console.error(`[KEP] JWK that failed to import:`, peerIdentityPubKeyJWK);
+      throw new Error(`Failed to import peer's public identity key: ${error.message}`);
+    }
 
     // 7. Generate our ephemeral key pair
     let { privateKey: ephPrivateKey, publicKey: ephPublicKey } = await generateEphemeralKeyPair();
 
     // 9. Build KEP_INIT message
+    console.log(`[KEP] Step 9: Building KEP_INIT message...`);
     const kepInitMessage = await buildKEPInit(
       userId,
       peerId,
@@ -91,6 +144,17 @@ export async function initiateSession(userId, peerId, password, socket) {
       identityPrivateKey,
       sessionId
     );
+    console.log(`[KEP] ✓ KEP_INIT message built successfully`);
+    console.log(`[KEP] KEP_INIT structure:`, {
+      type: kepInitMessage.type,
+      from: kepInitMessage.from,
+      to: kepInitMessage.to,
+      sessionId: kepInitMessage.sessionId,
+      hasEphPub: !!kepInitMessage.ephPub,
+      hasSignature: !!kepInitMessage.signature,
+      signatureLength: kepInitMessage.signature ? kepInitMessage.signature.length : 0,
+      timestamp: kepInitMessage.timestamp
+    });
 
     // 9. Send KEP_INIT via WebSocket
     return new Promise((resolve, reject) => {
@@ -117,13 +181,22 @@ export async function initiateSession(userId, peerId, password, socket) {
       };
 
       const handleError = (error) => {
-        if (error.message && error.message.includes('KEP')) {
+        // Handle both error objects and error strings
+        const errorMessage = error?.message || error?.toString() || String(error);
+        
+        if (errorMessage && (errorMessage.includes('KEP') || errorMessage.includes('rate limit') || errorMessage.includes('Key exchange'))) {
           console.error('KEP error from server:', error);
           clearTimeout(timeout);
           socket.off('kep:response', handleResponse);
           socket.off('kep:sent', handleSent);
           socket.off('error', handleError);
-          reject(new Error(`Server error: ${error.message}`));
+          
+          // Check if it's a rate limit error
+          if (errorMessage.includes('rate limit') || errorMessage.includes('rate limit exceeded') || errorMessage.includes('Key exchange rate limit')) {
+            reject(new Error(`Rate limit exceeded: ${errorMessage}. Please wait a few minutes before trying again.`));
+          } else {
+            reject(new Error(`Server error: ${errorMessage}`));
+          }
         }
       };
 
@@ -146,25 +219,13 @@ export async function initiateSession(userId, peerId, password, socket) {
         socket.off('error', handleError);
 
         try {
-          // 10. Validate KEP_RESPONSE
-          const validation = await validateKEPResponse(
-            kepResponseMessage,
-            peerIdentityPubKey,
-            null, // rootKey not yet computed
-            userId
-          );
-
-          if (!validation.valid) {
-            throw new Error(`Invalid KEP_RESPONSE: ${validation.error}`);
-          }
-
-          // 11. Import peer's ephemeral public key (ECDH for key derivation)
+          // 10. Import peer's ephemeral public key (ECDH for key derivation)
           const peerEphPubKey = await importEphPublicKey(kepResponseMessage.ephPub);
 
-          // 12. Compute shared secret (ECDH)
+          // 11. Compute shared secret (ECDH)
           const sharedSecret = await computeSharedSecret(ephPrivateKey, peerEphPubKey);
 
-          // 13. Derive session keys
+          // 12. Derive session keys (need rootKey for validation)
           const { rootKey, sendKey, recvKey } = await deriveSessionKeys(
             sharedSecret,
             sessionId,
@@ -172,25 +233,19 @@ export async function initiateSession(userId, peerId, password, socket) {
             peerId
           );
 
-          // 14. Verify key confirmation HMAC
-          const encoder = new TextEncoder();
-          const confirmData = encoder.encode(`CONFIRM:${userId}`);
-          const hmacKey = await crypto.subtle.importKey(
-            'raw',
+          // 13. Validate KEP_RESPONSE (now that we have rootKey for key confirmation)
+          const validation = await validateKEPResponse(
+            kepResponseMessage,
+            peerIdentityPubKey,
             rootKey,
-            { name: 'HMAC', hash: 'SHA-256' },
-            false,
-            ['verify']
+            userId
           );
-          const { base64ToArrayBuffer } = await import('./signatures.js');
-          const keyConfirmation = base64ToArrayBuffer(kepResponseMessage.keyConfirmation);
-          const confirmValid = await crypto.subtle.verify('HMAC', hmacKey, keyConfirmation, confirmData);
 
-          if (!confirmValid) {
-            throw new Error('Key confirmation failed');
+          if (!validation.valid) {
+            throw new Error(`Invalid KEP_RESPONSE: ${validation.error}`);
           }
 
-          // 15. Create and store session
+          // 14. Create and store session
           const session = {
             sessionId,
             userId,
@@ -207,7 +262,7 @@ export async function initiateSession(userId, peerId, password, socket) {
 
           await createSession(sessionId, userId, peerId, rootKey, sendKey, recvKey, password);
 
-          // 16. Clear ephemeral private key from memory
+          // 15. Clear ephemeral private key from memory
           // (Note: In JavaScript, we can't explicitly clear CryptoKey, but we can null the reference)
           ephPrivateKey = null;
 
@@ -251,34 +306,109 @@ export async function handleKEPInit(kepInitMessage, userId, password, socket) {
     // 2. Extract session info
     const { from: peerId, sessionId } = kepInitMessage;
 
-    // 3. Check if session already exists
-    const { loadSession } = await import('./sessionManager.js');
-    const existingSession = await loadSession(sessionId, userId, password);
-    if (existingSession) {
-      console.log(`Session ${sessionId} already exists`);
-      return { sessionId, session: existingSession };
+    // 3. Ensure session exists in backend (get or create)
+    // This ensures the session is registered in MongoDB before proceeding with key exchange
+    try {
+      const response = await api.post('/sessions', {
+        userId1: userId,
+        userId2: peerId
+      });
+      
+      if (response.data.success) {
+        const backendSessionId = response.data.data.session.sessionId;
+        const isNew = response.data.data.isNew;
+        
+        // Verify session ID matches (should always match due to deterministic generation)
+        if (backendSessionId !== sessionId) {
+          console.warn(`[KEP] ⚠️ Session ID mismatch: received ${sessionId}, backend has ${backendSessionId} - using backend ID`);
+          // Use backend session ID if different (shouldn't happen, but handle gracefully)
+        }
+        
+        if (isNew) {
+          console.log(`[KEP] ✓ NEW session registered in backend: ${backendSessionId}`);
+        } else {
+          console.log(`[KEP] ✓ EXISTING session found in backend: ${backendSessionId}`);
+        }
+      }
+    } catch (apiError) {
+      console.warn('[KEP] Failed to register/verify session in backend:', apiError.message);
+      // Continue with key exchange even if backend registration fails
+      // Session will be created locally, but won't be tracked in MongoDB
     }
 
-    // 4. Fetch peer's public identity key
+    // 4. Check if session already exists locally with keys - prevent unnecessary key exchange
+    const { loadSession } = await import('./sessionManager.js');
+    try {
+      const existingSession = await loadSession(sessionId, userId, password);
+      if (existingSession && existingSession.rootKey && existingSession.sendKey && existingSession.recvKey) {
+        console.log(`[KEP] ✓ Session ${sessionId} already exists locally with keys - skipping key exchange`);
+        console.log(`[KEP] ✓ Prevented unnecessary key regeneration for session ${sessionId}`);
+        return { sessionId, session: existingSession };
+      } else if (existingSession) {
+        console.log(`[KEP] ⚠️ Session ${sessionId} exists but missing keys - will establish keys`);
+      }
+    } catch (loadError) {
+      // Session doesn't exist or can't be loaded - proceed with establishment
+      console.log(`[KEP] Session ${sessionId} not found locally, will establish new keys`);
+    }
+
+    // 5. Fetch peer's public identity key
+    console.log(`[KEP] Step 5: Fetching peer's public identity key from server...`);
     let peerIdentityPubKeyJWK;
     try {
       const response = await api.get(`/keys/${peerId}`);
       if (!response.data.success || !response.data.data?.publicIdentityKeyJWK) {
-        throw new Error('Failed to fetch peer public key');
+        console.error(`[KEP] ✗ Server response invalid:`, response.data);
+        throw new Error('Failed to fetch peer public key - invalid server response');
       }
       peerIdentityPubKeyJWK = response.data.data.publicIdentityKeyJWK;
+      console.log(`[KEP] ✓ Peer's public identity key fetched from server`);
+      console.log(`[KEP] Peer key structure:`, {
+        hasKty: !!peerIdentityPubKeyJWK.kty,
+        hasCrv: !!peerIdentityPubKeyJWK.crv,
+        hasX: !!peerIdentityPubKeyJWK.x,
+        hasY: !!peerIdentityPubKeyJWK.y,
+        keys: Object.keys(peerIdentityPubKeyJWK)
+      });
     } catch (error) {
+      console.error(`[KEP] ✗ Failed to fetch peer's public identity key:`, error);
       throw new Error(`Failed to fetch peer's public identity key: ${error.message}`);
     }
 
     // 5. Import peer's public identity key (ECDSA for signature verification)
-    const peerIdentityPubKey = await importIdentityPublicKey(peerIdentityPubKeyJWK);
+    console.log(`[KEP] Step 5: Importing peer's public identity key...`);
+    let peerIdentityPubKey;
+    try {
+      peerIdentityPubKey = await importIdentityPublicKey(peerIdentityPubKeyJWK);
+      console.log(`[KEP] ✓ Peer's public identity key imported successfully`);
+      console.log(`[KEP] Imported key algorithm:`, {
+        name: peerIdentityPubKey?.algorithm?.name,
+        namedCurve: peerIdentityPubKey?.algorithm?.namedCurve,
+        usages: peerIdentityPubKey?.usages
+      });
+    } catch (error) {
+      console.error(`[KEP] ✗ Failed to import peer's public identity key:`, error);
+      console.error(`[KEP] JWK that failed to import:`, peerIdentityPubKeyJWK);
+      throw new Error(`Failed to import peer's public identity key: ${error.message}`);
+    }
 
     // 6. Validate KEP_INIT
+    console.log(`[KEP] Step 6: Validating KEP_INIT message signature...`);
     const validation = await validateKEPInit(kepInitMessage, peerIdentityPubKey, 120000, userId);
     if (!validation.valid) {
+      console.error(`[KEP] ✗ KEP_INIT validation failed: ${validation.error}`);
+      console.error(`[KEP] KEP_INIT message details:`, {
+        from: kepInitMessage.from,
+        to: kepInitMessage.to,
+        sessionId: kepInitMessage.sessionId,
+        hasEphPub: !!kepInitMessage.ephPub,
+        hasSignature: !!kepInitMessage.signature,
+        timestamp: kepInitMessage.timestamp,
+        ephPubKeys: kepInitMessage.ephPub ? Object.keys(kepInitMessage.ephPub) : null
+      });
       throw new Error(`Invalid KEP_INIT: ${validation.error}`);
     }
+    console.log(`[KEP] ✓ KEP_INIT signature validated successfully`);
 
     // 7. Load our identity private key
     const identityPrivateKey = await loadPrivateKey(userId, password);

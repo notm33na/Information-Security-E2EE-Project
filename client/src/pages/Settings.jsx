@@ -4,7 +4,6 @@ import {
   Shield,
   Bell,
   Palette,
-  Key,
   Smartphone,
   Lock,
   LogOut,
@@ -18,6 +17,7 @@ import {
 import { useAuth } from "../context/AuthContext";
 import { useNavigate } from "react-router-dom";
 import { useTheme } from "../context/ThemeContext";
+import { getBackendWebSocketURL } from "../config/backend.js";
 import { Header } from "../components/layout/Header";
 import { Button } from "../components/ui/button";
 import { Switch } from "../components/ui/switch";
@@ -88,7 +88,7 @@ export default function Settings() {
 
     const wsURL = import.meta.env.DEV 
       ? window.location.origin
-      : 'https://localhost:8443';
+      : getBackendWebSocketURL();
     
     const newSocket = io(wsURL, {
       transports: ['polling', 'websocket'],
@@ -107,7 +107,11 @@ export default function Settings() {
     setSocket(newSocket);
 
     return () => {
+      // Properly clean up socket on unmount or when accessToken changes
+      newSocket.removeAllListeners();
+      newSocket.disconnect();
       newSocket.close();
+      setSocket(null);
     };
   }, [accessToken]);
   
@@ -401,17 +405,6 @@ export default function Settings() {
               label="Change Password"
               description="Update your account password"
               onClick={() => setShowChangePasswordDialog(true)}
-            />
-            <SettingItem
-              icon={Key}
-              label="Two-Factor Authentication"
-              description="Enable 2FA for additional security"
-              onClick={() => {
-                toast({
-                  title: "Coming soon",
-                  description: "Two-factor authentication will be available in a future update.",
-                });
-              }}
             />
             <SettingItem
               icon={Smartphone}

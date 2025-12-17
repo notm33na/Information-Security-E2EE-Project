@@ -6,6 +6,7 @@ import { Input } from './ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { CheckCircle, XCircle } from 'lucide-react';
+import { getBackendWebSocketURL } from '../config/backend.js';
 
 /**
  * WebSocket test component
@@ -24,14 +25,15 @@ function WebSocketTest() {
       return;
     }
 
-    // Initialize Socket.IO connection with JWT token
-    // In development, use Vite proxy to avoid mixed content issues
-    // In production, connect directly to HTTPS
-    const wsURL = import.meta.env.DEV 
-      ? window.location.origin // Use same origin (Vite proxy will handle it)
-      : 'https://localhost:8443';
-    
-    const newSocket = io(wsURL, {
+    const setupSocket = () => {
+      // Initialize Socket.IO connection with JWT token
+      // In development, use Vite proxy to avoid mixed content issues
+      // In production, connect directly to HTTPS
+      const wsURL = import.meta.env.DEV 
+        ? window.location.origin // Use same origin (Vite proxy will handle it)
+        : getBackendWebSocketURL();
+      
+      const newSocket = io(wsURL, {
       transports: ['polling', 'websocket'], // Try polling first in dev (works through proxy)
       rejectUnauthorized: false, // Allow self-signed certificates in development
       auth: {
@@ -66,29 +68,34 @@ function WebSocketTest() {
       setMessages(prev => [...prev, { type: 'echo', data }]);
     });
 
-    newSocket.on('error', (data) => {
-      setMessages(prev => [...prev, { type: 'error', data }]);
-    });
+      newSocket.on('error', (data) => {
+        setMessages(prev => [...prev, { type: 'error', data }]);
+      });
 
-    newSocket.on('disconnect', () => {
-      console.log('WebSocket disconnected');
-      setConnected(false);
-    });
+      newSocket.on('disconnect', () => {
+        console.log('WebSocket disconnected');
+        setConnected(false);
+      });
 
-    newSocket.on('connect_error', (error) => {
-      // Only log once to avoid console spam
-      if (!newSocket._errorLogged) {
-        console.warn('WebSocket connection error (this is expected in development due to mixed content):', error.message);
-        newSocket._errorLogged = true;
-      }
-      setConnected(false);
-    });
+      newSocket.on('connect_error', (error) => {
+        // Only log once to avoid console spam
+        if (!newSocket._errorLogged) {
+          console.warn('WebSocket connection error (this is expected in development due to mixed content):', error.message);
+          newSocket._errorLogged = true;
+        }
+        setConnected(false);
+      });
 
-    setSocket(newSocket);
+      setSocket(newSocket);
+    };
+
+    setupSocket();
 
     // Cleanup on unmount
     return () => {
-      newSocket.close();
+      if (socket) {
+        socket.close();
+      }
     };
   }, [isAuthenticated, accessToken]);
 

@@ -18,6 +18,11 @@ import keysRouter from './routes/keys.routes.js';
 import kepRouter from './routes/kep.routes.js';
 import messagesRouter from './routes/messages.routes.js';
 import auditRouter from './routes/audit.routes.js';
+import filesRouter from './routes/files.routes.js';
+import logsRouter from './routes/logs.routes.js';
+import sessionsRouter from './routes/sessions.routes.js';
+import replayAttackRouter from './routes/replayAttack.routes.js';
+import mitmAttackRouter from './routes/mitmAttack.routes.js';
 // AI engine removed - not required for E2EE cryptography system
 
 // Load environment variables from project root
@@ -41,8 +46,8 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // Middleware
-app.use(express.json({ limit: '10mb' })); // Limit request body size
-app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Limit URL-encoded body size
+app.use(express.json({ limit: '50mb' })); // Increased limit for file uploads
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Increased limit for file uploads
 app.use(cookieParser()); // Parse cookies for refresh tokens
 app.use(morgan('combined'));
 
@@ -56,6 +61,11 @@ app.use('/api/keys', keysRouter);
 app.use('/api/kep', kepRouter);
 app.use('/api/messages', messagesRouter);
 app.use('/api/audit', auditRouter);
+app.use('/api/files', filesRouter);
+app.use('/api/logs', logsRouter);
+app.use('/api/sessions', sessionsRouter);
+app.use('/api/replay-attack', replayAttackRouter);
+app.use('/api/mitm-attack', mitmAttackRouter);
 // AI routes removed - not required for E2EE cryptography system
 
 // Error handling middleware

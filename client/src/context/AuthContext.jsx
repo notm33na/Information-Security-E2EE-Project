@@ -1,8 +1,9 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import api from '../services/api';
 import { setAccessToken as setTokenStore, clearAccessToken, setTokenUpdateCallback } from '../utils/tokenStore';
 import { generateIdentityKeyPair, storePrivateKeyEncrypted, exportPublicKey } from '../crypto/identityKeys.js';
 import { initializeSessionEncryption, clearSessionEncryptionCache } from '../crypto/sessionManager.js';
+import { getBackendWebSocketURL } from '../config/backend.js';
 
 const AuthContext = createContext(null);
 
@@ -12,6 +13,10 @@ const AuthContext = createContext(null);
  */
 // Password cache for session establishment (encrypted in memory, cleared on logout)
 const passwordCache = new Map(); // userId -> { password: string, expiresAt: number }
+
+// Global WebSocket connection for KEP_INIT handling
+let globalSocket = null;
+let globalSocketListeners = new Set();
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -86,7 +91,23 @@ export function AuthProvider({ children }) {
         if (token) {
           setTokenStore(token); // Update token store
           // Fetch user info
-          await fetchUser(token);
+          const user = await fetchUser(token);
+          
+          // Verify identity key persists after page refresh (if user is logged in)
+          if (user) {
+            try {
+              const { hasIdentityKey } = await import('../crypto/identityKeys.js');
+              const keyExists = await hasIdentityKey(user.id);
+              if (keyExists) {
+                console.log(`[Auth] ✓ Identity key verified in IndexedDB after page refresh for user ${user.id}`);
+              } else {
+                console.log(`[Auth] ⚠️ No identity key found in IndexedDB after page refresh for user ${user.id}`);
+              }
+            } catch (keyCheckError) {
+              console.warn('[Auth] Failed to check identity key after page refresh:', keyCheckError);
+              // Non-fatal
+            }
+          }
         }
       } catch (error) {
         console.error('Auth initialization failed:', error);
@@ -97,6 +118,131 @@ export function AuthProvider({ children }) {
 
     initializeAuth();
   }, [refreshAccessToken, fetchUser]);
+
+  /**
+   * Global WebSocket handler for KEP_INIT messages
+   * This ensures KEP_INIT messages are handled even when user isn't on Chat page
+   */
+  useEffect(() => {
+    if (!user?.id || !accessToken) {
+      // Clean up global socket if user logs out
+      if (globalSocket) {
+        globalSocket.off('kep:init');
+        globalSocket.close();
+        globalSocket = null;
+      }
+      return;
+    }
+
+    // Set up global WebSocket connection for KEP_INIT handling
+    const setupGlobalSocket = async () => {
+      try {
+        const { default: io } = await import('socket.io-client');
+        
+        // Reuse existing socket if available and connected
+        if (globalSocket && globalSocket.connected) {
+          console.log('[Global WS] Reusing existing connection');
+          return;
+        }
+
+        // Properly close existing socket if disconnected or in bad state
+        if (globalSocket) {
+          console.log('[Global WS] Closing existing socket before creating new one');
+          globalSocket.removeAllListeners(); // Remove all listeners to prevent leaks
+          globalSocket.disconnect(); // Disconnect first
+          globalSocket.close(); // Then close
+          globalSocket = null; // Clear reference
+        }
+
+        const wsURL = import.meta.env.DEV 
+          ? window.location.origin
+          : getBackendWebSocketURL();
+
+        globalSocket = io(wsURL, {
+          transports: ['polling', 'websocket'],
+          rejectUnauthorized: false,
+          auth: {
+            token: accessToken
+          },
+          reconnection: true,
+          reconnectionDelay: 1000,
+          reconnectionAttempts: Infinity,
+          reconnectionDelayMax: 10000,
+          timeout: 20000,
+          forceNew: false
+        });
+
+        globalSocket.on('connect', () => {
+          console.log('[Global WS] Connected for KEP_INIT handling');
+        });
+
+        // Handle KEP_INIT messages globally
+        const handleKEPInit = async (kepInitMessage) => {
+          if (!user?.id) {
+            console.warn('[Global KEP] Cannot handle KEP_INIT: user not available');
+            return;
+          }
+          
+          console.log(`[Global KEP] Received KEP_INIT from ${kepInitMessage?.from} for session ${kepInitMessage?.sessionId}`);
+          console.log(`[Global KEP] Message details:`, {
+            from: kepInitMessage?.from,
+            to: kepInitMessage?.to,
+            sessionId: kepInitMessage?.sessionId,
+            ourUserId: user.id,
+            messageType: kepInitMessage?.type
+          });
+          
+          // Verify this message is for us
+          if (kepInitMessage.to !== user.id) {
+            console.log(`[Global KEP] KEP_INIT not for us (to: ${kepInitMessage.to}, us: ${user.id})`);
+            return;
+          }
+
+          try {
+            // Get cached password directly from cache
+            const cached = passwordCache.get(user.id);
+            const password = cached && cached.expiresAt > Date.now() ? cached.password : null;
+            
+            if (!password) {
+              console.warn('[Global KEP] Password not cached - cannot respond to KEP_INIT');
+              return;
+            }
+
+            console.log(`[Global KEP] Processing KEP_INIT and preparing KEP_RESPONSE...`);
+            const { handleKEPInit } = await import('../crypto/sessionEstablishment.js');
+            await handleKEPInit(kepInitMessage, user.id, password, globalSocket);
+            console.log(`[Global KEP] ✓ Successfully handled KEP_INIT and sent KEP_RESPONSE`);
+          } catch (error) {
+            console.error('[Global KEP] ✗ Failed to handle KEP_INIT:', error);
+            console.error('[Global KEP] Error details:', {
+              message: error.message,
+              stack: error.stack,
+              name: error.name
+            });
+          }
+        };
+
+        globalSocket.on('kep:init', handleKEPInit);
+
+        globalSocket.on('disconnect', () => {
+          console.log('[Global WS] Disconnected');
+        });
+
+        globalSocket.on('error', (error) => {
+          console.warn('[Global WS] Error:', error);
+        });
+      } catch (error) {
+        console.error('[Global WS] Failed to set up global socket:', error);
+      }
+    };
+
+    setupGlobalSocket();
+
+    return () => {
+      // Don't close global socket on unmount - keep it alive for KEP_INIT handling
+      // It will be cleaned up when user logs out
+    };
+  }, [user?.id, accessToken]);
 
   /**
    * Login function
@@ -110,6 +256,21 @@ export function AuthProvider({ children }) {
         const { user, accessToken: token } = response.data.data;
         setUser(user);
         setAccessToken(token);
+        setTokenStore(token); // Store token in token store for API interceptor
+        
+        // Verify identity key exists in IndexedDB (do NOT regenerate)
+        try {
+          const { hasIdentityKey } = await import('../crypto/identityKeys.js');
+          const keyExists = await hasIdentityKey(user.id);
+          if (keyExists) {
+            console.log(`[Auth] ✓ Identity key verified in IndexedDB after login for user ${user.id}`);
+          } else {
+            console.log(`[Auth] ⚠️ No identity key found in IndexedDB for user ${user.id} - user should generate one`);
+          }
+        } catch (keyCheckError) {
+          console.warn('[Auth] Failed to check identity key existence:', keyCheckError);
+          // Non-fatal - user can generate key later
+        }
         
         // Initialize session encryption key cache
         try {
@@ -262,7 +423,7 @@ export function AuthProvider({ children }) {
   const cachePassword = useCallback((userId, password) => {
     passwordCache.set(userId, {
       password,
-      expiresAt: Date.now() + 60 * 60 * 1000 // 1 hour
+      expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours (matches session encryption key cache)
     });
   }, []);
 
@@ -300,19 +461,42 @@ export function AuthProvider({ children }) {
       // Ignore errors during logout
       console.error('Logout error:', error);
     } finally {
-      // Clear session encryption cache on logout
+      // Clear session encryption cache on logout (but NOT identity keys)
       if (user) {
-        clearSessionEncryptionCache(user.id);
-        passwordCache.delete(user.id); // Clear password cache
+        const userId = user.id;
+        clearSessionEncryptionCache(userId);
+        passwordCache.delete(userId); // Clear password cache
+        
+        // Verify identity key is NOT cleared (it should persist)
+        try {
+          const { hasIdentityKey } = await import('../crypto/identityKeys.js');
+          const keyExists = await hasIdentityKey(userId);
+          if (keyExists) {
+            console.log(`[Auth] ✓ Identity key preserved in IndexedDB after logout for user ${userId}`);
+          } else {
+            console.log(`[Auth] ⚠️ Identity key not found in IndexedDB after logout for user ${userId} (this is expected if user never generated one)`);
+          }
+        } catch (keyCheckError) {
+          console.warn('[Auth] Failed to verify identity key after logout:', keyCheckError);
+          // Non-fatal
+        }
         
         // Clear persisted messages
         try {
           const { clearAllUserMessages } = await import('../utils/messageStorage.js');
-          await clearAllUserMessages(user.id);
+          await clearAllUserMessages(userId);
         } catch (error) {
           console.warn('Failed to clear user messages:', error);
         }
       }
+      
+      // Close global WebSocket on logout
+      if (globalSocket) {
+        globalSocket.off('kep:init');
+        globalSocket.close();
+        globalSocket = null;
+      }
+      
       setUser(null);
       setAccessToken(null);
       clearAccessToken(); // Clear token store

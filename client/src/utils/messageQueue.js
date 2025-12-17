@@ -6,7 +6,7 @@
 
 const QUEUE_STORE = 'messageQueue';
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 7;
+const DB_VERSION = 8; // Incremented to ensure messageQueue store is created
 
 /**
  * Opens IndexedDB database
@@ -18,8 +18,6 @@ async function openDB() {
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const db = request.result;
-      // Store existence is checked in individual functions
-      // If stores don't exist, functions will handle it gracefully
       resolve(db);
     };
 

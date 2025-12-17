@@ -9,7 +9,7 @@ import { encryptAESGCM, generateIV } from './aesGcm.js';
 import { buildFileMetaEnvelope, buildFileChunkEnvelope } from './messageEnvelope.js';
 import { getSendKey } from './sessionManager.js';
 
-const CHUNK_SIZE = 256 * 1024; // 256 KB
+const CHUNK_SIZE = 64 * 1024; // 64 KB per spec (64-128KB range)
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB maximum file size
 
 /**
@@ -24,9 +24,8 @@ const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB maximum file size
  */
 export async function encryptFile(file, sessionId, sender, receiver, userId = null, onProgress = null) {
   try {
-    // 1. Read file as ArrayBuffer
-    const fileBuffer = await file.arrayBuffer();
-    const fileSize = fileBuffer.byteLength;
+    // 1. Get file size without loading entire file into memory
+    const fileSize = file.size;
 
     // 2. Validate file size
     if (fileSize > MAX_FILE_SIZE) {
@@ -40,7 +39,7 @@ export async function encryptFile(file, sessionId, sender, receiver, userId = nu
     // If userId not provided, will try to get from session
     const sendKey = await getSendKey(sessionId, userId || sender);
 
-    // 4. Encrypt file metadata
+    // 5. Encrypt file metadata
     const metadata = {
       filename: file.name,
       size: fileSize,
@@ -65,16 +64,20 @@ export async function encryptFile(file, sessionId, sender, receiver, userId = nu
       metadata
     );
 
-    // 5. Encrypt file chunks
+    // 6. Encrypt file chunks using streaming (File.slice) to avoid loading entire file
+    // This is REQUIRED for large file handling per spec
     const chunkEnvelopes = [];
     const startTime = Date.now();
 
     for (let i = 0; i < totalChunks; i++) {
       const start = i * CHUNK_SIZE;
       const end = Math.min(start + CHUNK_SIZE, fileSize);
-      const chunk = fileBuffer.slice(start, end);
+      
+      // Use File.slice() for streaming - don't load entire file into memory
+      const chunkBlob = file.slice(start, end);
+      const chunk = await chunkBlob.arrayBuffer();
 
-      // Encrypt chunk
+      // Encrypt chunk with unique IV per chunk (generated in encryptAESGCM)
       const { ciphertext, iv, authTag } = await encryptAESGCM(sendKey, chunk);
 
       // Build chunk envelope

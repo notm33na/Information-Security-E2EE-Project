@@ -55,7 +55,7 @@ export function triggerInvalidSignature(sessionId, message) {
 }
 
 const DB_NAME = 'InfosecCryptoDB';
-const DB_VERSION = 7; // Must match the highest version used by any module
+const DB_VERSION = 8; // Must match the highest version used by any module
 const SESSIONS_STORE = 'sessions';
 const SESSION_ENCRYPTION_STORE = 'sessionEncryptionKeys'; // Store encryption metadata
 
@@ -290,10 +290,10 @@ async function getSessionEncryptionKey(userId, password) {
   const saltArray = new Uint8Array(encryptionData.salt);
   const key = await deriveSessionEncryptionKey(password, saltArray);
 
-  // Cache for 1 hour
+  // Cache for 24 hours (longer than password cache to allow session decryption after page refresh)
   sessionEncryptionKeyCache.set(userId, {
     key: key,
-    expiresAt: Date.now() + 60 * 60 * 1000 // 1 hour
+    expiresAt: Date.now() + 24 * 60 * 60 * 1000 // 24 hours
   });
 
   return key;
@@ -390,6 +390,7 @@ function base64ToArrayBuffer(base64) {
 
 /**
  * Creates a new session with encrypted key storage
+ * Checks if session already exists before creating to prevent duplicate key generation
  * @param {string} sessionId - Unique session identifier
  * @param {string} userId - Our user ID
  * @param {string} peerId - Peer user ID
@@ -401,6 +402,18 @@ function base64ToArrayBuffer(base64) {
  */
 export async function createSession(sessionId, userId, peerId, rootKey, sendKey, recvKey, password = null) {
   try {
+    console.log(`[Session Manager] createSession called for session ${sessionId} (userId: ${userId}, peerId: ${peerId})`);
+    
+    // Check if session already exists - prevent duplicate key generation
+    const existingSession = await loadSession(sessionId, userId, password).catch(() => null);
+    if (existingSession) {
+      console.log(`[Session Manager] ⚠️ Session ${sessionId} already exists with keys - preventing unnecessary key regeneration`);
+      console.log(`[Session Manager] ✓ Reusing existing session keys for session ${sessionId}`);
+      return; // Session already exists, don't overwrite
+    }
+
+    console.log(`[Session Manager] Generating session keys for new session ${sessionId}`);
+
     // Get encryption key (from cache or derive from password)
     let encryptionKey = null;
     if (password) {
@@ -440,6 +453,9 @@ export async function createSession(sessionId, userId, peerId, rootKey, sendKey,
         authTag: Array.from(new Uint8Array(recvKeyEnc.authTag))
       },
       encrypted: true, // Flag to indicate encrypted storage
+      status: 'active', // Key lifecycle status: 'active' or 'inactive'
+      statusReason: null, // Reason for status change (e.g., "Superseded by new session <sessionId>")
+      statusChangedAt: null, // Timestamp when status was changed
       lastSeq: 0,
       lastTimestamp: Date.now(),
       // Track recently used nonce hashes (client-side replay protection).
@@ -459,7 +475,17 @@ export async function createSession(sessionId, userId, peerId, rootKey, sendKey,
       request.onerror = () => reject(request.error);
     });
 
-    console.log(`✓ Session created with encrypted keys: ${sessionId}`);
+    console.log(`[Session Manager] ✓ Session created with encrypted keys: ${sessionId}`);
+    console.log(`[Session Manager] ✓ Session keys stored in IndexedDB for session ${sessionId}`);
+    console.log(`[Session Manager] ✓ Activated keys for session ${sessionId}`);
+
+    // Mark old session keys as inactive for this peer
+    try {
+      await cleanupOldSessionsForPeer(userId, peerId, sessionId);
+    } catch (cleanupError) {
+      // Non-fatal - log but don't fail session creation
+      console.warn(`[Session Manager] Failed to mark old sessions as inactive (non-fatal):`, cleanupError);
+    }
   } catch (error) {
     throw new Error(`Failed to create session: ${error.message}`);
   }
@@ -493,6 +519,8 @@ export function validateSessionAccess(session, requestingUserId) {
  */
 export async function loadSession(sessionId, userId = null, password = null) {
   try {
+    console.log(`[Session Manager] loadSession called for session ${sessionId} (userId: ${userId || 'auto'})`);
+    
     const db = await openDB();
     const transaction = db.transaction([SESSIONS_STORE], 'readonly');
     const store = transaction.objectStore(SESSIONS_STORE);
@@ -504,13 +532,18 @@ export async function loadSession(sessionId, userId = null, password = null) {
     });
 
     if (!session) {
+      console.log(`[Session Manager] No session found in IndexedDB for session ${sessionId}`);
       return null;
     }
 
+    console.log(`[Session Manager] ✓ Found session ${sessionId} in IndexedDB, loading keys...`);
+
     // Handle legacy unencrypted sessions (backward compatibility)
     if (!session.encrypted) {
+      console.log(`[Session Manager] ✓ Loaded legacy unencrypted session keys from IndexedDB for session ${sessionId}`);
       return {
         ...session,
+        status: session.status || 'active', // Default to active for backward compatibility
         rootKey: base64ToArrayBuffer(session.rootKey),
         sendKey: base64ToArrayBuffer(session.sendKey),
         recvKey: base64ToArrayBuffer(session.recvKey)
@@ -556,13 +589,18 @@ export async function loadSession(sessionId, userId = null, password = null) {
     const recvKeyTag = new Uint8Array(session.recvKey.authTag).buffer;
     const recvKey = await decryptSessionKey(recvKeyBuf, recvKeyIV, recvKeyTag, encryptionKey);
 
+    console.log(`[Session Manager] ✓ Loaded keys from IndexedDB for session ${sessionId}`);
+    console.log(`[Session Manager] ✓ Reusing existing session keys for session ${sessionId}`);
+
     return {
       ...session,
+      status: session.status || 'active', // Default to active for backward compatibility
       rootKey,
       sendKey,
       recvKey
     };
   } catch (error) {
+    console.error(`[Session Manager] ✗ Failed to load session ${sessionId}:`, error.message);
     throw new Error(`Failed to load session: ${error.message}`);
   }
 }
@@ -609,10 +647,54 @@ export async function updateSessionSeq(sessionId, seq, userId = null) {
  * @param {string} userId - User ID (for encryption key lookup)
  * @returns {Promise<ArrayBuffer>} Send key
  */
+/**
+ * Ensures a self-storage session exists, creating it if necessary
+ * For file storage, we create a session with a randomly generated shared secret
+ * @param {string} sessionId - Session identifier (e.g., `storage-${userId}`)
+ * @param {string} userId - User ID
+ * @returns {Promise<void>}
+ */
+export async function ensureStorageSession(sessionId, userId) {
+  try {
+    // Check if session already exists
+    const existing = await loadSession(sessionId, userId);
+    if (existing) {
+      return; // Session already exists
+    }
+
+    // Generate a random shared secret for self-storage (256 bits)
+    const sharedSecret = crypto.getRandomValues(new Uint8Array(32)).buffer;
+
+    // Derive session keys using HKDF (same as normal sessions)
+    const { deriveSessionKeys } = await import('./ecdh.js');
+    const { rootKey, sendKey, recvKey } = await deriveSessionKeys(
+      sharedSecret,
+      sessionId,
+      userId,
+      userId // For self-storage, peerId = userId
+    );
+
+    // Create session (will use cached encryption key if available)
+    await createSession(sessionId, userId, userId, rootKey, sendKey, recvKey, null);
+
+    console.log(`✓ Storage session created: ${sessionId}`);
+  } catch (error) {
+    throw new Error(`Failed to ensure storage session: ${error.message}`);
+  }
+}
+
 export async function getSendKey(sessionId, userId = null) {
   try {
     const session = await loadSession(sessionId, userId);
     if (!session) {
+      // If it's a storage session, try to create it
+      if (sessionId && sessionId.startsWith('storage-') && userId) {
+        await ensureStorageSession(sessionId, userId);
+        const newSession = await loadSession(sessionId, userId);
+        if (newSession) {
+          return newSession.sendKey;
+        }
+      }
       throw new Error('Session not found');
     }
     return session.sendKey;
@@ -631,6 +713,14 @@ export async function getRecvKey(sessionId, userId = null) {
   try {
     const session = await loadSession(sessionId, userId);
     if (!session) {
+      // If it's a storage session, try to create it
+      if (sessionId && sessionId.startsWith('storage-') && userId) {
+        await ensureStorageSession(sessionId, userId);
+        const newSession = await loadSession(sessionId, userId);
+        if (newSession) {
+          return newSession.recvKey;
+        }
+      }
       throw new Error('Session not found');
     }
     return session.recvKey;
@@ -733,18 +823,288 @@ export async function deleteSession(sessionId) {
       request.onerror = () => reject(request.error);
     });
 
-    console.log(`✓ Session deleted: ${sessionId}`);
+    console.log(`[Session Manager] ✓ Session deleted: ${sessionId}`);
   } catch (error) {
     throw new Error(`Failed to delete session: ${error.message}`);
   }
 }
 
 /**
- * Gets all sessions for a user
- * @param {string} userId - User ID
- * @returns {Promise<Array>} Array of sessions
+ * Marks old session keys as inactive for a peer when a new session is created
+ * This prevents accumulation of abandoned session keys while preserving history
+ * @param {string} userId - Our user ID
+ * @param {string} peerId - Peer user ID
+ * @param {string} currentSessionId - The current active session ID
+ * @returns {Promise<number>} Number of old sessions marked inactive
  */
-export async function getUserSessions(userId) {
+export async function cleanupOldSessionsForPeer(userId, peerId, currentSessionId) {
+  try {
+    console.log(`[Session Manager] Marking old session keys as inactive for peer ${peerId}, activating session ${currentSessionId}`);
+    
+    const db = await openDB();
+    const transaction = db.transaction([SESSIONS_STORE], 'readwrite');
+    const store = transaction.objectStore(SESSIONS_STORE);
+
+    const allSessions = await new Promise((resolve, reject) => {
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    // Find sessions with the same peer but different session ID
+    const oldSessions = allSessions.filter(session => {
+      const isSamePeer = (session.userId === userId && session.peerId === peerId) ||
+                        (session.userId === peerId && session.peerId === userId);
+      const isDifferentSession = session.sessionId !== currentSessionId;
+      const isCurrentlyActive = session.status !== 'inactive'; // Only mark active sessions as inactive
+      return isSamePeer && isDifferentSession && isCurrentlyActive;
+    });
+
+    if (oldSessions.length === 0) {
+      console.log(`[Session Manager] No old active sessions to mark inactive for peer ${peerId}`);
+      return 0;
+    }
+
+    console.log(`[Session Manager] Found ${oldSessions.length} old active session(s) to mark inactive for peer ${peerId}`);
+
+    // Mark old sessions as inactive instead of deleting
+    let markedCount = 0;
+    for (const oldSession of oldSessions) {
+      try {
+        // Update session status to inactive
+        oldSession.status = 'inactive';
+        oldSession.statusReason = `Superseded by new session ${currentSessionId}`;
+        oldSession.statusChangedAt = new Date().toISOString();
+        oldSession.updatedAt = new Date().toISOString();
+
+        await new Promise((resolve, reject) => {
+          const updateRequest = store.put(oldSession);
+          updateRequest.onsuccess = () => {
+            markedCount++;
+            console.log(`[Session Manager] ✓ Marked key for session ${oldSession.sessionId} as Inactive (superseded by ${currentSessionId})`);
+            resolve();
+          };
+          updateRequest.onerror = () => reject(updateRequest.error);
+        });
+      } catch (error) {
+        console.error(`[Session Manager] Failed to mark session ${oldSession.sessionId} as inactive:`, error);
+      }
+    }
+
+    // Mark current session as active
+    try {
+      const currentSession = allSessions.find(s => s.sessionId === currentSessionId);
+      if (currentSession) {
+        currentSession.status = 'active';
+        currentSession.statusReason = null;
+        currentSession.statusChangedAt = new Date().toISOString();
+        currentSession.updatedAt = new Date().toISOString();
+        
+        await new Promise((resolve, reject) => {
+          const updateRequest = store.put(currentSession);
+          updateRequest.onsuccess = () => {
+            console.log(`[Session Manager] ✓ Activated keys for session ${currentSessionId}`);
+            resolve();
+          };
+          updateRequest.onerror = () => reject(updateRequest.error);
+        });
+      }
+    } catch (error) {
+      console.error(`[Session Manager] Failed to activate session ${currentSessionId}:`, error);
+    }
+
+    if (markedCount > 0) {
+      console.log(`[Session Manager] ✓ Outdated session keys moved to inactive state: ${markedCount} session(s) for peer ${peerId}`);
+    }
+    
+    return markedCount;
+  } catch (error) {
+    console.error(`[Session Manager] Error marking old sessions as inactive:`, error);
+    return 0;
+  }
+}
+
+/**
+ * Retroactively marks old sessions as inactive based on backend active sessions
+ * This fixes sessions that were created before cleanup logic was implemented
+ * @param {string} userId - User ID
+ * @param {Set<string>} activeSessionIds - Set of active session IDs from backend
+ * @returns {Promise<number>} Number of sessions marked inactive
+ */
+export async function cleanupInactiveSessions(userId, activeSessionIds) {
+  try {
+    console.log(`[Session Manager] Cleaning up inactive sessions for user ${userId}`);
+    
+    // Use metadata-only function to avoid decryption issues
+    const allSessions = await getSessionMetadata(userId);
+    
+    // Also get all sessions from IndexedDB for updating (including those not belonging to user)
+    const db = await openDB();
+    const transaction = db.transaction([SESSIONS_STORE], 'readwrite');
+    const store = transaction.objectStore(SESSIONS_STORE);
+
+    const allSessionsRaw = await new Promise((resolve, reject) => {
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    // Group sessions by peer (using metadata)
+    const sessionsByPeer = new Map(); // peerId -> [session metadata]
+    for (const session of allSessions) {
+      const peerId = session.userId === userId ? session.peerId : session.userId;
+      if (!sessionsByPeer.has(peerId)) {
+        sessionsByPeer.set(peerId, []);
+      }
+      sessionsByPeer.get(peerId).push(session);
+    }
+
+    let markedCount = 0;
+
+    // For each peer, determine active session and mark others as inactive
+    for (const [peerId, peerSessions] of sessionsByPeer.entries()) {
+      // Find active session (backend has priority)
+      let activeSessionId = null;
+      
+      // Check backend active sessions first
+      const backendActiveSession = peerSessions.find(s => activeSessionIds.has(s.sessionId));
+      if (backendActiveSession) {
+        activeSessionId = backendActiveSession.sessionId;
+      } else {
+        // No backend active session - find most recent non-inactive session
+        const activeSessions = peerSessions.filter(s => s.status !== 'inactive');
+        if (activeSessions.length > 0) {
+          activeSessions.sort((a, b) => {
+            const timeA = new Date(a.lastActivity || a.updatedAt || a.createdAt || 0).getTime();
+            const timeB = new Date(b.lastActivity || b.updatedAt || b.createdAt || 0).getTime();
+            return timeB - timeA;
+          });
+          activeSessionId = activeSessions[0].sessionId;
+        }
+      }
+
+      if (!activeSessionId) {
+        continue; // No active session found for this peer
+      }
+
+      // Mark all other sessions for this peer as inactive
+      for (const sessionMeta of peerSessions) {
+        // Find the raw session object for updating
+        const rawSession = allSessionsRaw.find(s => s.sessionId === sessionMeta.sessionId);
+        if (!rawSession) continue;
+
+        if (sessionMeta.sessionId !== activeSessionId && rawSession.status !== 'inactive') {
+          try {
+            rawSession.status = 'inactive';
+            rawSession.statusReason = `Superseded by session ${activeSessionId.substring(0, 8)}...`;
+            rawSession.statusChangedAt = new Date().toISOString();
+            rawSession.updatedAt = new Date().toISOString();
+
+            await new Promise((resolve, reject) => {
+              const updateRequest = store.put(rawSession);
+              updateRequest.onsuccess = () => {
+                markedCount++;
+                console.log(`[Session Manager] ✓ Retroactively marked session ${sessionMeta.sessionId} as inactive for peer ${peerId}`);
+                resolve();
+              };
+              updateRequest.onerror = () => reject(updateRequest.error);
+            });
+          } catch (error) {
+            console.error(`[Session Manager] Failed to mark session ${sessionMeta.sessionId} as inactive:`, error);
+          }
+        } else if (sessionMeta.sessionId === activeSessionId && rawSession.status !== 'active') {
+          // Ensure active session is marked as active
+          try {
+            rawSession.status = 'active';
+            rawSession.statusReason = null;
+            rawSession.statusChangedAt = new Date().toISOString();
+            rawSession.updatedAt = new Date().toISOString();
+
+            await new Promise((resolve, reject) => {
+              const updateRequest = store.put(rawSession);
+              updateRequest.onsuccess = () => {
+                console.log(`[Session Manager] ✓ Marked session ${activeSessionId} as active for peer ${peerId}`);
+                resolve();
+              };
+              updateRequest.onerror = () => reject(updateRequest.error);
+            });
+          } catch (error) {
+            console.error(`[Session Manager] Failed to mark session ${activeSessionId} as active:`, error);
+          }
+        }
+      }
+    }
+
+    if (markedCount > 0) {
+      console.log(`[Session Manager] ✓ Retroactively marked ${markedCount} session(s) as inactive`);
+    }
+    
+    return markedCount;
+  } catch (error) {
+    console.error(`[Session Manager] Error cleaning up inactive sessions:`, error);
+    return 0;
+  }
+}
+
+/**
+ * Gets session metadata without decrypting keys (for status management)
+ * @param {string} userId - User ID
+ * @returns {Promise<Array>} Array of session metadata
+ */
+export async function getSessionMetadata(userId) {
+  try {
+    const db = await openDB();
+    
+    // Verify store exists before attempting transaction
+    if (!db.objectStoreNames.contains(SESSIONS_STORE)) {
+      console.warn('sessions store does not exist, returning empty array');
+      return [];
+    }
+    
+    const transaction = db.transaction([SESSIONS_STORE], 'readonly');
+    const store = transaction.objectStore(SESSIONS_STORE);
+
+    const sessions = await new Promise((resolve, reject) => {
+      const request = store.getAll();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+
+    // Filter by userId and return metadata only (no decryption)
+    const metadataSessions = [];
+    for (const s of sessions) {
+      if (s.userId === userId || s.peerId === userId) {
+        metadataSessions.push({
+          sessionId: s.sessionId,
+          userId: s.userId,
+          peerId: s.peerId,
+          status: s.status || 'active', // Default to active for backward compatibility
+          statusReason: s.statusReason || null,
+          statusChangedAt: s.statusChangedAt || null,
+          createdAt: s.createdAt,
+          updatedAt: s.updatedAt,
+          lastActivity: s.lastActivity,
+          lastSeq: s.lastSeq,
+          lastTimestamp: s.lastTimestamp,
+          encrypted: s.encrypted,
+          hasKeys: !!(s.rootKey && s.sendKey && s.recvKey) // Check if keys exist without decrypting
+        });
+      }
+    }
+    return metadataSessions;
+  } catch (error) {
+    console.error('Failed to get session metadata:', error);
+    return [];
+  }
+}
+
+/**
+ * Gets all sessions for a user (with decrypted keys)
+ * @param {string} userId - User ID
+ * @param {string} password - Optional password for decryption
+ * @returns {Promise<Array>} Array of sessions with decrypted keys
+ */
+export async function getUserSessions(userId, password = null) {
   try {
     const db = await openDB();
     
@@ -765,19 +1125,34 @@ export async function getUserSessions(userId) {
 
     // Filter by userId and decrypt keys
     const decryptedSessions = [];
+    let skippedCount = 0;
+    
     for (const s of sessions) {
       if (s.userId === userId || s.peerId === userId) {
         try {
-          const decrypted = await loadSession(s.sessionId, userId);
+          const decrypted = await loadSession(s.sessionId, userId, password);
           if (decrypted) {
             decryptedSessions.push(decrypted);
           }
         } catch (error) {
-          console.warn(`Failed to decrypt session ${s.sessionId}:`, error);
           // Skip sessions that can't be decrypted
+          // This can happen if:
+          // 1. Password cache expired (normal - user needs to log in again)
+          // 2. Session was encrypted with different password (user changed password)
+          // 3. Session was encrypted with different salt (rare, but possible)
+          skippedCount++;
+          // Only log first few to avoid spam
+          if (skippedCount <= 3) {
+            console.warn(`[Session Manager] Skipping session ${s.sessionId.substring(0, 8)}... (decryption failed):`, error.message);
+          }
         }
       }
     }
+    
+    if (skippedCount > 0) {
+      console.log(`[Session Manager] Skipped ${skippedCount} session(s) that could not be decrypted (password may have changed or cache expired)`);
+    }
+    
     return decryptedSessions;
   } catch (error) {
     console.error('Failed to get user sessions:', error);

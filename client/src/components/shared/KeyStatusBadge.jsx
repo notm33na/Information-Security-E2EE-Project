@@ -9,6 +9,13 @@ const statusConfig = {
     border: "border-success/20",
     label: "Active",
   },
+  inactive: {
+    icon: XCircle,
+    bg: "bg-muted/10",
+    text: "text-muted-foreground",
+    border: "border-muted/20",
+    label: "Inactive",
+  },
   expiring: {
     icon: AlertCircle,
     bg: "bg-warning/10",
